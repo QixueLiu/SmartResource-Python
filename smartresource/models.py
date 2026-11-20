@@ -60,3 +60,15 @@ class ScanRequest(BaseModel):
 class ReaderRequest(BaseModel):
     site_id: int = Field(gt=0)
     url: str = Field(min_length=8, max_length=1500)
+
+
+class ShelfCreate(BaseModel):
+    site_id: int = Field(gt=0)
+    book_url: str = Field(min_length=8, max_length=1500)
+    title: str = Field(min_length=1, max_length=200)
+
+
+class ShelfProgress(BaseModel):
+    chapter_url: str = Field(min_length=8, max_length=1500)
+    chapter_title: str = Field(default="", max_length=200)
+    progress: float = Field(ge=0.0, le=1.0)

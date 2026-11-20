@@ -1,6 +1,6 @@
 [project]
 name = "smartresource-python"
-version = "0.7.0"
+version = "0.8.0"
 description = "Local self-hosted website search and analysis for SmartResource Android"
 requires-python = ">=3.11"
 dependencies = [

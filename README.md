@@ -17,6 +17,19 @@ pytest -q
 
 将 \`SMARTRESOURCE_API_TOKEN\` 设置为随机、足够长的值；不设置则仅健康检查可用，其他 API 返回 503。Android APP 在设置页填写 Token。需要手机外网访问时，优先通过 Tailscale；仅允许 Tailscale 网络访问该端口，**切勿把 8000 直接暴露公网**。
 
+## 小说书架与跨设备阅读进度（0.8）
+
+增加由自建 FastAPI Token 保护的私有书架。数据保存在 Python 服务端 SQLite，不上传第三方云服务；同一服务地址和 Token 可以让不同 Android 设备看到同一记录。
+
+- `GET /api/shelf`：按最后更新时间查看已收藏作品、所属站点、最后章节和阅读百分比。
+- `POST /api/shelf`：正文 `{"site_id":1,"book_url":"https://books.example.org/book/1","title":"作品名称"}`，首次收藏或重复打开；同一站点 + 原始作品 URL 唯一，重复添加不覆盖进度。
+- `PUT /api/shelf/{id}/progress`：`{"chapter_url":"https://books.example.org/chapter/5","chapter_title":"第5章","progress":0.42}`。百分比范围 0–1，章节必须和原作品网站同域名。
+- `DELETE /api/shelf/{id}`：从书架中删除，需在 Android UI 中确认。
+
+Android 搜索结果点击“阅读”会自动添加到书架；以后可以在“书架”中继续上次章节。阅读滚动过程中防抖同步百分比；阅读器仍在手机本地保存显示设置。服务端不储存整章正文或版权内容。
+
+限制：这是单用户私有服务器方案，共用同一个 API Token 的客户端共享书架，目前没有多账号权限隔离和跨设备冲突合并。禁用或删除网站后保留书架元数据，无法通过已禁用站点读取新章节。当前未实现离线缓存。
+
 ## 本地 Ollama AI 规则分析（0.7）
 
 本地 AI 模块默认关闭，不依赖云端 API。RTX 3050 8GB 主机可以先尝试一个轻量模型：

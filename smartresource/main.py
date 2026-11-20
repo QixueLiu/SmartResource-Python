@@ -5,11 +5,12 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
 from .reader import extract_reader_page
+from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
 from .analyzer import analyze_html
 from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
@@ -25,7 +26,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.7.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.8.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -57,7 +58,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.7.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.8.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -317,3 +318,38 @@ async def reader_open(request: ReaderRequest):
         raise HTTPException(
             502, "网页正文提取未完成，请使用原网页：" + str(exc)[:130]
         ) from exc
+
+
+@app.get("/api/shelf", dependencies=[Depends(require_token)])
+def shelf_list():
+    """Book metadata and last saved progress, stored on this private server."""
+    return {"items": list_books()}
+
+
+@app.post("/api/shelf", status_code=201, dependencies=[Depends(require_token)])
+def shelf_add(book: ShelfCreate):
+    # Re-adding a book does not reset its chapter or scroll percentage.
+    try:
+        return add_book(book.site_id, book.book_url, book.title)
+    except ShelfInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/shelf/{book_id}/progress", dependencies=[Depends(require_token)])
+def shelf_progress(book_id: int, update: ShelfProgress):
+    try:
+        return save_progress(
+            book_id, update.chapter_url, update.chapter_title, update.progress
+        )
+    except ShelfInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/shelf/{book_id}", dependencies=[Depends(require_token)])
+def shelf_delete(book_id: int):
+    try:
+        return remove_book(book_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc

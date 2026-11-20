@@ -47,5 +47,20 @@ def initialize():
         for column, kind in OPTIONAL_COLUMNS.items():
             if column not in columns:
                 conn.execute(f"ALTER TABLE sites ADD COLUMN {column} {kind}")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS novel_shelf (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id INTEGER NOT NULL,
+            book_url TEXT NOT NULL,
+            title TEXT NOT NULL,
+            last_chapter_url TEXT NOT NULL,
+            last_chapter_title TEXT NOT NULL DEFAULT '',
+            progress REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (site_id, book_url)
+        )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_novel_shelf_updated ON novel_shelf(updated_at)")
         # The app server may have stopped while analyzing; these scans can be retried.
         conn.execute("UPDATE sites SET scan_status='pending' WHERE scan_status IN ('queued','running')")
