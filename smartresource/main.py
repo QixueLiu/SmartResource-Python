@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest, VideoFavoriteCreate, VideoQuickSave, VideoLastPage
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest, VideoFavoriteCreate, VideoQuickSave, VideoTitlePatch, VideoLastPage
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
@@ -15,7 +15,7 @@ from .fallback_sources import find_sources
 from .site_health import health_map, site_health_detail, observe, classify_error
 from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
 from .video_library import (
-    list_videos, save_video, save_current_video_page, remember_video_page, delete_video, VideoLibraryError
+    list_videos, save_video, save_current_video_page, rename_video, reset_video_page, remember_video_page, delete_video, VideoLibraryError
 )
 from .video_episodes import parse_episodes
 from .analyzer import analyze_html
@@ -533,6 +533,24 @@ def video_quick_save(item: VideoQuickSave):
         return save_current_video_page(item.title, item.url)
     except VideoLibraryError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/videos/shelf/{video_id}/title", dependencies=[Depends(require_token)])
+def video_change_title(video_id: int, item: VideoTitlePatch):
+    try:
+        return rename_video(video_id, item.title)
+    except VideoLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/videos/shelf/{video_id}/last-page", dependencies=[Depends(require_token)])
+def video_clear_last_page(video_id: int):
+    try:
+        return reset_video_page(video_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.put("/api/videos/shelf/{video_id}/last-page", dependencies=[Depends(require_token)])
