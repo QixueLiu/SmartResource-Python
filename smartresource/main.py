@@ -596,6 +596,46 @@ def video_last_page(video_id: int, item: VideoLastPage):
 
 
 
+async def _load_public_video_episodes(page_url: str, host: str):
+    """At most one public detail-page request, never media extraction."""
+    try:
+        html = await asyncio.wait_for(fetch_html(page_url, host), timeout=7.0)
+        return parse_episodes(html, page_url, host)
+    except Exception:
+        return {
+            "status": "unavailable", "items": [],
+            "note": "暂时无法识别选集，可继续在原网站直接观看。"
+        }
+
+
+@app.get("/api/videos/episodes", dependencies=[Depends(require_token)])
+async def preview_video_episodes(
+    site_id: int = Query(gt=0),
+    url: str = Query(min_length=8, max_length=1500),
+):
+    """Explicit on-demand episode hints for a video not yet favorited."""
+    with connect() as conn:
+        site = conn.execute(
+            "SELECT base_url, enabled, kind FROM sites WHERE id=?",
+            (site_id,),
+        ).fetchone()
+    if site is None:
+        raise HTTPException(404, "来源网站不存在")
+    if not site["enabled"]:
+        return {"status": "unavailable", "items": [], "note": "来源网站已停用"}
+    if site["kind"] == "novel":
+        raise HTTPException(422, "小说网站不支持视频选集")
+    try:
+        host = validate_public_url(url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if host != urlsplit(site["base_url"]).hostname:
+        raise HTTPException(422, "视频地址与来源网站域名不一致")
+    if not urlsplit(url).path.strip("/") and not urlsplit(url).query:
+        raise HTTPException(422, "请选择具体作品详情页而非网站首页")
+    return await _load_public_video_episodes(url, host)
+
+
 @app.get("/api/videos/shelf/{video_id}/episodes", dependencies=[Depends(require_token)])
 async def video_episode_links(video_id: int):
     """Read one saved public detail page, never scan a full series or media."""
@@ -612,17 +652,7 @@ async def video_episode_links(video_id: int):
     host = urlsplit(row["base_url"]).hostname
     if validate_public_url(row["video_url"]) != host:
         raise HTTPException(422, "收藏地址与网站域名不一致")
-    try:
-        # One public HTML request with a strict overall response-time cap.
-        html = await asyncio.wait_for(
-            fetch_html(row["video_url"], host), timeout=7.0
-        )
-        return parse_episodes(html, row["video_url"], host)
-    except Exception:
-        return {
-            "status": "unavailable", "items": [],
-            "note": "暂时无法识别选集，可继续在原网站直接观看。"
-        }
+    return await _load_public_video_episodes(row["video_url"], host)
 
 
 @app.delete("/api/videos/shelf/{video_id}", dependencies=[Depends(require_token)])
