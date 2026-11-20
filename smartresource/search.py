@@ -2,6 +2,7 @@ import asyncio
 from urllib.parse import urljoin, quote_plus, urlsplit
 from bs4 import BeautifulSoup
 from .fetcher import fetch_html
+from .browser_renderer import fetch_analysis_html
 
 
 def extract_search_results(site: dict, html: str, search_url: str):
@@ -65,7 +66,7 @@ async def fetch_site_results(site: dict, keyword: str):
         return [], "未发现已保存的站内搜索地址（仍可原网页浏览）"
     url = site["search_url_template"].replace("{q}", quote_plus(keyword)).replace("{page}", "1")
     try:
-        html = await fetch_html(url, urlsplit(site["base_url"]).hostname)
+        html, _ = await fetch_analysis_html(url, urlsplit(site["base_url"]).hostname, http_fetch=fetch_html)
         fields = ("item_selector", "title_selector", "link_selector")
         if all(site.get(k) for k in fields):
             rows = extract_search_results(site, html, url)

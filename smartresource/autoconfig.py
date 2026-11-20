@@ -93,9 +93,12 @@ async def _scan_one(site_id: int):
 
         # One matching title/link pair is a limited positive control.
         if search_url:
+            async def fetch_probe(url, expected_host):
+                content, _ = await fetch_analysis_html(url, expected_host, http_fetch=fetch_html)
+                return content
             probed = await verify_search(
                 {**site, "kind": kind, "search_url_template": search_url},
-                html, fetch=fetch_html
+                html, fetch=fetch_probe
             )
             status = probed["status"]
             evidence.append(probed["message"])

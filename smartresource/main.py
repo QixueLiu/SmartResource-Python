@@ -215,7 +215,10 @@ async def verify_site_search(site_id: int):
     host = urlsplit(site["base_url"]).hostname
     try:
         home, mode = await fetch_analysis_html(site["base_url"], host, http_fetch=fetch_html)
-        result = await verify_search(site, home, fetch=fetch_html)
+        async def fetch_probe(url, expected_host):
+            content, _ = await fetch_analysis_html(url, expected_host, http_fetch=fetch_html)
+            return content
+        result = await verify_search(site, home, fetch=fetch_probe)
         with connect() as conn:
             conn.execute(
                 """UPDATE sites SET scan_status=?, scan_message=?, scan_checked_at=?

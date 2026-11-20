@@ -4,6 +4,7 @@ import re
 from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 from .fetcher import fetch_html
+from .browser_renderer import fetch_analysis_html
 from .analyzer import detect_toc
 
 CHAPTER_NUMBER = re.compile(r"第\s*(\d{1,6})\s*[章节回]")
@@ -68,7 +69,7 @@ async def compare(sites_by_id: dict, candidates):
                 host = urlsplit(site["base_url"]).hostname
                 if urlsplit(candidate.url).hostname != host:
                     raise ValueError("目录网址和站点域名不匹配")
-                html = await fetch_html(candidate.url, host)
+                html, _ = await fetch_analysis_html(candidate.url, host, http_fetch=fetch_html)
                 auto_discovered = False
                 working_site = site
                 if not site.get("toc_item_selector") or not site.get("toc_link_selector"):
