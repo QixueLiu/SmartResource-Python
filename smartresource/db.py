@@ -61,6 +61,9 @@ def initialize():
             UNIQUE (site_id, book_url)
         )
         """)
+        shelf_columns = {row[1] for row in conn.execute("PRAGMA table_info(novel_shelf)")}
+        if "title_custom" not in shelf_columns:
+            conn.execute("ALTER TABLE novel_shelf ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_novel_shelf_updated ON novel_shelf(updated_at)")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS site_health_events (
