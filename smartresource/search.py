@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
 from .site_health import observe, classify_error, health_map, rank_sites
+from .search_pagination import discover_next_search_page
 
 # Keep one slow/broken site from delaying every search result.
 MAX_SEARCH_SITES = 24
@@ -26,6 +27,7 @@ SITE_CACHE_MAX_ENTRIES = 160
 # One user, one Python service: process-local only, no Redis or new DB.
 _search_cache = {}
 _site_cache = {}
+_next_link_cache = {}
 
 
 def _normal_title(value: str) -> str:
@@ -100,6 +102,36 @@ def _get_cached(key):
     cached["cached"] = True
     cached["elapsed_ms"] = 0
     return cached
+
+
+def _next_key(site: dict, keyword: str, current_url: str | None = None):
+    # The source fetch function is part of the key to prevent cross-test
+    # cache collisions while preserving regular quick-to-full reuse.
+    return (_site_cache_key(site, keyword), current_url or "first")
+
+
+def _save_next_link(site: dict, keyword: str, url: str | None, current_url=None):
+    key = _next_key(site, keyword, current_url)
+    _next_link_cache[key] = (time.monotonic() + CACHE_TTL_SECONDS, url)
+    if len(_next_link_cache) > SITE_CACHE_MAX_ENTRIES * 3:
+        now = time.monotonic()
+        for old_key, (until, _) in list(_next_link_cache.items()):
+            if until <= now:
+                _next_link_cache.pop(old_key, None)
+        while len(_next_link_cache) > SITE_CACHE_MAX_ENTRIES * 3:
+            _next_link_cache.pop(next(iter(_next_link_cache)))
+
+
+def _load_next_link(site: dict, keyword: str, current_url=None):
+    key = _next_key(site, keyword, current_url)
+    cached = _next_link_cache.get(key)
+    if not cached:
+        return None
+    until, value = cached
+    if until <= time.monotonic():
+        _next_link_cache.pop(key, None)
+        return None
+    return value
 
 
 def _put_cached(key, value):
@@ -197,7 +229,12 @@ async def fetch_site_results(site: dict, keyword: str):
         return [], "未发现已保存的站内搜索地址（仍可原网页浏览）"
     url = site["search_url_template"].replace("{q}", quote_plus(keyword)).replace("{page}", "1")
     try:
-        html, _ = await fetch_analysis_html(url, urlsplit(site["base_url"]).hostname, http_fetch=fetch_html)
+        host = urlsplit(site["base_url"]).hostname
+        html, _ = await fetch_analysis_html(url, host, http_fetch=fetch_html)
+        if "{page}" not in (site.get("search_url_template") or ""):
+            _save_next_link(
+                site, keyword, discover_next_search_page(html, url, host)
+            )
         fields = ("item_selector", "title_selector", "link_selector")
         verified_css = all(site.get(k) for k in fields)
         if verified_css:
@@ -259,6 +296,33 @@ async def fetch_additional_search_page(
     return (
         heuristic_search_results(site, html, url, keyword),
         "后续页使用未经验证的关键词候选",
+    )
+
+
+async def fetch_discovered_search_page(
+    site: dict, keyword: str, next_url: str
+) -> tuple[list[dict], str | None, str | None]:
+    """Fetch only a previously observed validated next link, never guesses."""
+    host = urlsplit(site["base_url"]).hostname
+    from .security import validate_public_url
+
+    if validate_public_url(next_url) != host:
+        raise ValueError("发现的分页地址不是原站安全网址")
+    html, _ = await fetch_analysis_html(next_url, host, http_fetch=fetch_html)
+    following = discover_next_search_page(html, next_url, host)
+    fields = ("item_selector", "title_selector", "link_selector")
+    if all(site.get(field) for field in fields):
+        items = extract_search_results(site, html, next_url, keyword)
+        if items:
+            return items, None, following
+        fallback = heuristic_search_results(site, html, next_url, keyword)
+        return fallback, (
+            "自动识别分页的 CSS 未命中，使用未经验证候选" if fallback else None
+        ), following
+    return (
+        heuristic_search_results(site, html, next_url, keyword),
+        "自动识别分页使用未经验证候选",
+        following,
     )
 
 
@@ -356,11 +420,8 @@ async def search_all(
     concurrency = 8 if mode == "fast" else FULL_SEARCH_CONCURRENCY
     chosen = ordered[:limit]
     skipped = len(ordered) - len(chosen)
-    paginated_sites = sum(
-        "{q}" in (site.get("search_url_template") or "") and
-        "{page}" in (site.get("search_url_template") or "")
-        for site in chosen
-    )
+    # Check both explicit templates and links cached from prior quick
+    # searches. A fresh first-page fetch can discover more links below.
 
     if not chosen:
         response = {
@@ -371,6 +432,7 @@ async def search_all(
             "reused_sites": 0,
             "extra_pages_fetched": 0,
             "paginated_sites": 0,
+            "discovered_pagination_sites": 0,
             "mode": mode, "kind": kind, "cached": False,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
         }
@@ -381,19 +443,18 @@ async def search_all(
 
     async def one(site):
         first_key = _site_cache_key(site, query)
-        has_pages = (
-            mode == "full"
-            and "{q}" in (site.get("search_url_template") or "")
-            and "{page}" in (site.get("search_url_template") or "")
-        )
+        template = site.get("search_url_template") or ""
+        explicit_pages = "{q}" in template and "{page}" in template
+        discovered = _load_next_link(site, query) if not refresh else None
+        supports_pages = explicit_pages or bool(discovered)
         full_key = first_key + ("full_pages",)
-        if has_pages and not refresh:
+        if mode == "full" and supports_pages and not refresh:
             full_cached = _read_site_cache(full_key)
             if full_cached is not None:
                 return (*full_cached, True, 0)
 
         first_cached = _read_site_cache(first_key) if not refresh else None
-        if not has_pages and first_cached is not None:
+        if (mode != "full" or not supports_pages) and first_cached is not None:
             return (*first_cached, True, 0)
 
         async with semaphore:
@@ -410,10 +471,15 @@ async def search_all(
                     return [], "网站响应超过单站6秒限制", False, 0
                 _write_site_cache(first_key, (first_rows, first_warning))
 
-            if not has_pages or (first_warning or "").startswith("检索失败："):
+            discovered = _load_next_link(site, query)
+            if mode != "full" or not (explicit_pages or discovered) or (
+                first_warning or ""
+            ).startswith("检索失败："):
                 return first_rows, first_warning, reused, 0
 
             results = _merge_site_pages(first_rows, [])
+            next_url = discovered
+            seen_page_urls = set()
             warning = first_warning
             extra_pages = 0
             complete = True
@@ -425,11 +491,21 @@ async def search_all(
                     warning = (warning + "；" if warning else "") + "后续分页达到单站时间上限"
                     complete = False
                     break
+                if not explicit_pages:
+                    if not next_url or next_url in seen_page_urls:
+                        break
+                    seen_page_urls.add(next_url)
                 try:
-                    rows, page_warning = await asyncio.wait_for(
-                        fetch_additional_search_page(site, query, page),
-                        timeout=remaining
-                    )
+                    if explicit_pages:
+                        rows, page_warning = await asyncio.wait_for(
+                            fetch_additional_search_page(site, query, page),
+                            timeout=remaining
+                        )
+                    else:
+                        rows, page_warning, next_url = await asyncio.wait_for(
+                            fetch_discovered_search_page(site, query, next_url),
+                            timeout=remaining
+                        )
                     extra_pages += 1
                 except asyncio.TimeoutError:
                     warning = (warning + "；" if warning else "") + "后续分页读取超时"
@@ -508,6 +584,17 @@ async def search_all(
     for item in results:
         item.pop("_source_order", None)
 
+    paginated_sites = sum(
+        ("{q}" in (site.get("search_url_template") or "") and
+         "{page}" in (site.get("search_url_template") or ""))
+        or bool(_load_next_link(site, query))
+        for site in chosen
+    )
+    discovered_pagination_sites = sum(
+        "{page}" not in (site.get("search_url_template") or "")
+        and bool(_load_next_link(site, query))
+        for site in chosen
+    )
     response = {
         "items": results, "warnings": warnings,
         "searched_sites": len(chosen),
@@ -519,6 +606,7 @@ async def search_all(
         "reused_sites": reused_count,
         "extra_pages_fetched": extra_pages_fetched,
         "paginated_sites": paginated_sites,
+        "discovered_pagination_sites": discovered_pagination_sites,
         "mode": mode, "kind": kind, "cached": False,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
     }
