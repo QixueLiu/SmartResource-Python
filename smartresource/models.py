@@ -92,5 +92,9 @@ class VideoQuickSave(BaseModel):
     url: str = Field(min_length=8, max_length=1500)
 
 
+class VideoTitlePatch(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
 class VideoLastPage(BaseModel):
     url: str = Field(min_length=8, max_length=1500)
