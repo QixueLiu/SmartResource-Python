@@ -5,11 +5,12 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
 from .reader import extract_reader_page, expand_toc_result
+from .fallback_sources import find_sources
 from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
 from .analyzer import analyze_html
 from .fetcher import fetch_html
@@ -26,7 +27,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.9.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.10.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -58,7 +59,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.9.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.10.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -362,3 +363,25 @@ def shelf_delete(book_id: int):
         return remove_book(book_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/reader/alternatives", dependencies=[Depends(require_token)])
+async def reader_alternatives(request: AlternativesRequest):
+    """Find same-title books and verify one matching chapter on trusted sites.
+
+    No book-source switching is performed by this endpoint; it returns evidence
+    for the Android user to approve.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM novel_shelf WHERE id=?", (request.book_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "书架中没有这本小说")
+        sites = [dict(s) for s in conn.execute(
+            "SELECT * FROM sites WHERE enabled=1 ORDER BY id DESC"
+        ).fetchall()]
+    result = await find_sources(
+        dict(row), sites, request.chapter_title, max_sites=request.max_sites
+    )
+    return {"book_id": request.book_id, **result}

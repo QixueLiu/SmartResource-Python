@@ -73,3 +73,9 @@ class ShelfProgress(BaseModel):
     chapter_url: str = Field(min_length=8, max_length=1500)
     chapter_title: str = Field(default="", max_length=200)
     progress: float = Field(ge=0.0, le=1.0)
+
+
+class AlternativesRequest(BaseModel):
+    book_id: int = Field(gt=0)
+    chapter_title: str = Field(min_length=1, max_length=200)
+    max_sites: int = Field(default=6, ge=1, le=8)
