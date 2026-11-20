@@ -79,6 +79,63 @@ def remember_video_page(video_id: int, url: str):
     return dict(updated)
 
 
+
+
+def save_current_video_page(title: str, page_url: str):
+    """One explicit browser bookmark action, without fetching the website.
+
+    Existing site configuration is never changed; when a host is new, create
+    a video-only source with no scan or search rules. One-page bookmarks keep
+    working even if a site doesn't expose a machine-readable search form.
+    """
+    from urllib.parse import urldefrag
+
+    page_url = urldefrag(page_url.strip())[0]
+    try:
+        host = validate_public_url(page_url)
+    except ValueError as exc:
+        raise VideoLibraryError(str(exc)) from exc
+    parsed = urlsplit(page_url)
+    if not parsed.path.strip("/") and not parsed.query:
+        raise VideoLibraryError("请先打开具体视频或剧集页面，再点击收藏")
+    title = title.strip()
+    if not title:
+        raise VideoLibraryError("视频标题不能为空")
+
+    new_site = False
+    with connect() as conn:
+        # Never create a second site just because someone opened http vs https.
+        existing = next(
+            (row for row in conn.execute("SELECT * FROM sites ORDER BY id DESC")
+             if urlsplit(row["base_url"]).hostname == host),
+            None,
+        )
+        if existing is not None:
+            if not existing["enabled"]:
+                raise VideoLibraryError("此网站已停用，请在网站管理中启用后收藏")
+            if existing["kind"] == "novel":
+                raise VideoLibraryError("该网站已设置为小说来源，请先检查网站类型")
+            site_id = existing["id"]
+            site_name = existing["name"]
+        else:
+            base_url = f"{parsed.scheme}://{host}"
+            # INSERT OR IGNORE protects concurrent explicit saves.
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO sites
+                   (name, base_url, kind, enabled, scan_status, scan_message)
+                   VALUES (?, ?, 'video', 1, 'skipped', ?)""",
+                (host, base_url, "浏览器视频收藏创建；未执行自动网页扫描"),
+            )
+            row = conn.execute(
+                "SELECT id, name FROM sites WHERE base_url=?", (base_url,)
+            ).fetchone()
+            if row is None:
+                raise VideoLibraryError("无法创建视频来源")
+            site_id, site_name = row["id"], row["name"]
+            new_site = cursor.rowcount == 1
+    saved = save_video(site_id, title, page_url)
+    return {**saved, "site_name": site_name, "created_site": new_site}
+
 def delete_video(video_id: int):
     with connect() as conn:
         affected = conn.execute(
