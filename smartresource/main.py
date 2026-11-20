@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest, VideoFavoriteCreate, VideoLastPage
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest, VideoFavoriteCreate, VideoQuickSave, VideoLastPage
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
@@ -15,7 +15,7 @@ from .fallback_sources import find_sources
 from .site_health import health_map, site_health_detail, observe, classify_error
 from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
 from .video_library import (
-    list_videos, save_video, remember_video_page, delete_video, VideoLibraryError
+    list_videos, save_video, save_current_video_page, remember_video_page, delete_video, VideoLibraryError
 )
 from .video_episodes import parse_episodes
 from .analyzer import analyze_html
@@ -522,6 +522,15 @@ def video_favorites():
 def video_favorite_add(item: VideoFavoriteCreate):
     try:
         return save_video(item.site_id, item.title, item.video_url)
+    except VideoLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/videos/quick-save", status_code=201, dependencies=[Depends(require_token)])
+def video_quick_save(item: VideoQuickSave):
+    """Save an explicitly chosen browser page without fetching external content."""
+    try:
+        return save_current_video_page(item.title, item.url)
     except VideoLibraryError as exc:
         raise HTTPException(422, str(exc)) from exc
 
