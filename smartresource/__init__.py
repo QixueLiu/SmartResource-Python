@@ -1,0 +1,1 @@
+"""SmartResource self-hosted backend."""
