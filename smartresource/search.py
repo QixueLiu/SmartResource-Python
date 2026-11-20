@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import os
+import re
 import time
 import unicodedata
 from urllib.parse import urljoin, quote_plus, urlsplit, urlunsplit
@@ -26,7 +27,40 @@ _site_cache = {}
 
 
 def _normal_title(value: str) -> str:
-    return "".join(unicodedata.normalize("NFKC", value).casefold().split())
+    """Ignore spaces and punctuation, but retain letters, digits and CJK."""
+    return "".join(
+        char for char in unicodedata.normalize("NFKC", value).casefold()
+        if char.isalnum()
+    )
+
+
+_GENERIC_TITLE_SUFFIX = (
+    "最新", "全文", "全本", "免费", "在线", "目录", "章节", "阅读",
+    "小说", "全集", "完整", "高清", "播放", "txt下载", "完结",
+)
+
+
+def _core_title_match(title: str, keyword: str) -> bool:
+    """Recognize 《书名》免费阅读 without treating 《书名》第二部 as exact."""
+    match = re.match(r"^\s*[《「『](.{1,120})[》」』](.*)$", title)
+    if not match or _normal_title(match.group(1)) != keyword:
+        return False
+    trailing = _normal_title(match.group(2))
+    return not trailing or trailing.startswith(_GENERIC_TITLE_SUFFIX)
+
+
+def _match_grade(title: str, keyword: str, context: str = "") -> str:
+    needle = _normal_title(keyword)
+    candidate = _normal_title(title)
+    if not needle or not candidate:
+        return "unrelated"
+    if candidate == needle or _core_title_match(title, needle):
+        return "exact"
+    if candidate.startswith(needle) or needle in candidate:
+        return "title"
+    if len(needle) >= 2 and needle in _normal_title(context):
+        return "context"
+    return "unrelated"
 
 
 def _dedup_key(value: str) -> str:
@@ -37,15 +71,8 @@ def _dedup_key(value: str) -> str:
 
 
 def _quality(item: dict, keyword: str) -> int:
-    title = _normal_title(item.get("title", ""))
-    needle = _normal_title(keyword)
-    if title == needle:
-        return 0
-    if title.startswith(needle):
-        return 1
-    if needle in title:
-        return 2
-    return 3
+    grade = item.get("match_grade") or _match_grade(item.get("title", ""), keyword)
+    return {"exact": 0, "title": 1, "context": 2, "unrelated": 3}.get(grade, 3)
 
 
 def _cache_key(sites: list[dict], keyword: str, mode: str, kind: str):
@@ -83,9 +110,17 @@ def _put_cached(key, value):
     _search_cache[key] = (now + CACHE_TTL_SECONDS, copy.deepcopy(value))
 
 
-def extract_search_results(site: dict, html: str, search_url: str):
+def extract_search_results(
+    site: dict, html: str, search_url: str, keyword: str | None = None
+):
+    """Parse site CSS, ignoring unrelated recommendations for actual searches.
+
+    Description/author text within the *same result row* may retain a lower
+    confidence match even when the work title itself differs.
+    """
     soup = BeautifulSoup(html, "html.parser")
     results = []
+    seen = set()
     host = urlsplit(site["base_url"]).hostname
     for row in soup.select(site["item_selector"])[:60]:
         title_el = row.select_one(site["title_selector"])
@@ -96,13 +131,28 @@ def extract_search_results(site: dict, html: str, search_url: str):
         parsed = urlsplit(target)
         if parsed.scheme not in ("http", "https") or parsed.hostname != host:
             continue
-        title = title_el.get_text(" ", strip=True)
-        if title:
-            results.append({
-                "title": title[:200],
-                "url": target, "site_id": site["id"],
-                "site_name": site["name"], "kind": site["kind"]
-            })
+        title = title_el.get_text(" ", strip=True)[:200]
+        if not title:
+            continue
+        grade = (
+            _match_grade(title, keyword, row.get_text(" ", strip=True)[:600])
+            if keyword else ""
+        )
+        if grade == "unrelated":
+            continue
+        dedup = _dedup_key(target)
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        result = {
+            "title": title,
+            "url": target, "site_id": site["id"],
+            "site_name": site["name"], "kind": site["kind"]
+        }
+        if grade:
+            result["match_grade"] = grade
+            result["extraction"] = "css"
+        results.append(result)
     return results
 
 
@@ -114,13 +164,13 @@ def heuristic_search_results(site: dict, html: str, search_url: str, keyword: st
     """
     soup = BeautifulSoup(html, "html.parser")
     host = urlsplit(site["base_url"]).hostname
-    needle = "".join(keyword.casefold().split())
+    needle = _normal_title(keyword)
     seen, result = set(), []
     for a in soup.select("a[href]")[:8000]:
         title = a.get_text(" ", strip=True)[:200]
         if not title or len(title) < 2 or len(title) > 160:
             continue
-        if needle not in "".join(title.casefold().split()):
+        if needle not in _normal_title(title):
             continue
         target = urljoin(search_url, (a.get("href") or "").strip())
         parsed = urlsplit(target)
@@ -132,7 +182,8 @@ def heuristic_search_results(site: dict, html: str, search_url: str, keyword: st
         result.append({
             "title": title, "url": target, "site_id": site["id"],
             "site_name": site["name"], "kind": site["kind"],
-            "extraction": "heuristic"
+            "extraction": "heuristic",
+            "match_grade": _match_grade(title, keyword)
         })
         if len(result) == 40:
             break
@@ -148,7 +199,7 @@ async def fetch_site_results(site: dict, keyword: str):
         fields = ("item_selector", "title_selector", "link_selector")
         verified_css = all(site.get(k) for k in fields)
         if verified_css:
-            rows = extract_search_results(site, html, url)
+            rows = extract_search_results(site, html, url, keyword)
             warning = None
             if not rows:
                 # A site may change its CSS without changing its GET search URL.
@@ -161,7 +212,9 @@ async def fetch_site_results(site: dict, keyword: str):
         else:
             rows = heuristic_search_results(site, html, url, keyword)
             warning = "使用关键字链接匹配，属于未经验证的候选结果，建议补充 CSS 规则"
-        if rows and verified_css and warning is None:
+        if rows and verified_css and warning is None and any(
+            row.get("match_grade") in ("exact", "title") for row in rows
+        ):
             observe(site["id"], "search", "success", "ok")
         elif rows:
             observe(site["id"], "search", "neutral", "heuristic_results")
