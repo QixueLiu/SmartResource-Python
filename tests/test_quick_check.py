@@ -84,7 +84,8 @@ def test_search_budget_reports_skipped_sites_and_keeps_results(monkeypatch):
     from smartresource.site_health import rank_sites
     # Supply unknown ids without an initialized DB; ranking has neutral fallback.
     sites = [
-        {"id":i,"name":str(i), "kind":"novel", "base_url":f"https://{i}.example.org"}
+        {"id":i,"name":str(i), "kind":"novel", "base_url":f"https://{i}.example.org",
+         "search_url_template":f"https://{i}.example.org/search?q={{q}}"}
         for i in range(1, 4)
     ]
     result = asyncio.run(search.search_all(sites, "x"))
