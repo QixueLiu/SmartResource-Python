@@ -49,3 +49,9 @@ class CompareRequest(BaseModel):
 class AnalyzeRequest(BaseModel):
     # Optional same-domain chapter index/details page. If absent, visit base URL.
     page_url: str | None = Field(default=None, max_length=1500)
+
+
+class ScanRequest(BaseModel):
+    # When IDs are omitted, scan up to 'limit' sites needing setup.
+    site_ids: list[int] = Field(default_factory=list, max_length=200)
+    limit: int = Field(default=100, ge=1, le=200)
