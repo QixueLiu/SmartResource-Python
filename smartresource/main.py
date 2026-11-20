@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.24.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.26.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -70,7 +70,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.24.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.26.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
