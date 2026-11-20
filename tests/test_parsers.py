@@ -29,3 +29,31 @@ def test_toc_gap_duplicates_and_foreign_link():
     assert r["inferred_missing_count"] == 1
     assert r["missing_number_examples"] == [3]
     assert r["latest_chapter"] == "第4章 结局"
+
+
+
+def test_compare_auto_discovers_toc_without_saved_css(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from smartresource import novels
+
+    html = """<ul id="chapters">
+    <li><a href="/novel/1">第1章 开始</a></li>
+    <li><a href="/novel/2">第2章 中间</a></li>
+    <li><a href="/novel/4">第4章 结局</a></li>
+    </ul>"""
+
+    async def fake_fetch(url, host):
+        assert url == "https://books.example.com/book/1"
+        assert host == "books.example.com"
+        return html
+
+    monkeypatch.setattr(novels, "fetch_html", fake_fetch)
+    site = {**SITE, "toc_item_selector": None, "toc_title_selector": None, "toc_link_selector": None}
+    candidates = [SimpleNamespace(site_id=1, url="https://books.example.com/book/1")]
+    report = asyncio.run(novels.compare({1: site}, candidates))
+    row = report["items"][0]
+    assert row["auto_discovered"] is True
+    assert row["chapter_count"] == 3
+    assert row["inferred_missing_count"] == 1
+    assert row["confidence"] in ("medium", "low")
