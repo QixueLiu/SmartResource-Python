@@ -10,6 +10,7 @@ from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
 from .site_health import observe, classify_error, health_map, rank_sites
 from .search_pagination import discover_next_search_page
+from .search_grouping import annotate_same_title_candidates
 
 # Keep one slow/broken site from delaying every search result.
 MAX_SEARCH_SITES = 24
@@ -574,15 +575,22 @@ async def search_all(
                 "_source_order": index,
             })
 
-    # Exact titles first, then partial matches. Preserve better source health
-    # before lower-ranked sources and put uncertain heuristic hits last.
+    # Relevance remains the primary ranking signal. Among equally relevant
+    # candidates, favor verified CSS extraction and only trust site health
+    # after it has at least four real success/failure observations.
+    def stable_site_score(item):
+        health = item.get("source_health") or {}
+        return health.get("score", 50) if health.get("samples", 0) >= 4 else 50
+
     results.sort(key=lambda item: (
         _quality(item, query),
         bool(item.get("extraction") == "heuristic"),
+        -stable_site_score(item),
         item["_source_order"],
     ))
     for item in results:
         item.pop("_source_order", None)
+    annotate_same_title_candidates(results)
 
     paginated_sites = sum(
         ("{q}" in (site.get("search_url_template") or "") and
