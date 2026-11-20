@@ -86,6 +86,9 @@ def initialize():
             UNIQUE(site_id, video_url)
         )
         """)
+        video_columns = {row[1] for row in conn.execute("PRAGMA table_info(video_library)")}
+        if "title_custom" not in video_columns:
+            conn.execute("ALTER TABLE video_library ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_video_library_updated ON video_library(updated_at)")
         # The app server may have stopped while analyzing; these scans can be retried.
         conn.execute("UPDATE sites SET scan_status='pending' WHERE scan_status IN ('queued','running')")
