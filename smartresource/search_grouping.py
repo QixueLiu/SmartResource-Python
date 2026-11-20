@@ -6,6 +6,7 @@ candidate or deduplicate unrelated URLs as part of this grouping.
 import re
 import unicodedata
 from collections import defaultdict
+from .video_titles import video_title_details
 
 _DECORATIVE_SUFFIX = (
     "最新", "全文", "全本", "免费", "在线", "目录", "章节",
@@ -27,6 +28,18 @@ def title_group_key(item: dict) -> str:
     if kind not in ("novel", "video"):
         return ""
     title = str(item.get("title") or "").strip()
+    if kind == "video":
+        hints = video_title_details(title)
+        item.update(hints)
+        core = hints["video_title_key"]
+        if not core:
+            return ""
+        # A missing year/season/edition is UNKNOWN, not equivalent to a
+        # specific observed one. This intentionally favors precision.
+        year = hints["video_release_year"] or "?"
+        season = hints["video_season_number"] or "?"
+        edition = hints["video_edition"] or "?"
+        return f"video:{core}:year={year}:season={season}:edition={edition}"
     wrapped = _WRAPPED_TITLE.match(title)
     if wrapped:
         suffix = normalized_title(wrapped.group(2))
