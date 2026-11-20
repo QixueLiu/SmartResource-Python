@@ -293,6 +293,7 @@ async def search_all(
 
     by_id = {}
     timeout_count = len(pending)
+    per_site_timeouts = 0
     reused_count = 0
     for task in done:
         site = tasks[task]
@@ -305,6 +306,7 @@ async def search_all(
             reused_count += 1
         if record[1] and "超过单站6秒" in record[1]:
             timeout_count += 1
+            per_site_timeouts += 1
 
     results, seen, warnings = [], set(), []
     for index, site in enumerate(chosen):
@@ -337,7 +339,7 @@ async def search_all(
     response = {
         "items": results, "warnings": warnings,
         "searched_sites": len(chosen),
-        "completed_sites": len(done),
+        "completed_sites": len(done) - per_site_timeouts,
         "searchable_sites": len(searchable),
         "unconfigured_sites": unconfigured,
         "skipped_sites": skipped,
