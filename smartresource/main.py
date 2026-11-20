@@ -5,10 +5,12 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
+from .analyzer import analyze_html
+from .fetcher import fetch_html
 
 
 @asynccontextmanager
@@ -17,7 +19,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.3.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -49,7 +51,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.2.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.3.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -145,6 +147,28 @@ def import_text(data: UrlImport):
             except (ValueError, sqlite3.Error) as exc:
                 failed.append({"line": index + 1, "reason": str(exc)[:150]})
     return {"created": created, "existing": len(lines) - created - len(failed), "failed": failed}
+
+
+@app.post("/api/sites/{site_id}/analyze", dependencies=[Depends(require_token)])
+async def analyze_site(site_id: int, request: AnalyzeRequest):
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM sites WHERE id=?", (site_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "站点不存在")
+    site = dict(row)
+    page_url = request.page_url or site["base_url"]
+    host = urlsplit(site["base_url"]).hostname
+    try:
+        if validate_public_url(page_url) != host:
+            raise ValueError("只允许分析当前站点同域名的网址")
+        html = await fetch_html(page_url, host)
+        return analyze_html(html, page_url, site)
+    except ValueError as exc:
+        if "只允许分析" in str(exc) or "不允许" in str(exc) or "仅支持" in str(exc):
+            raise HTTPException(422, str(exc)) from exc
+        raise HTTPException(502, "网站结构分析失败：" + str(exc)[:180]) from exc
+    except Exception as exc:
+        raise HTTPException(502, "目标网站访问或解析失败：" + str(exc)[:180]) from exc
 
 
 @app.get("/api/search", dependencies=[Depends(require_token)])

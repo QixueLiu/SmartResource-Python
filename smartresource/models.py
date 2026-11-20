@@ -44,3 +44,8 @@ class CompareCandidate(BaseModel):
 
 class CompareRequest(BaseModel):
     candidates: list[CompareCandidate] = Field(min_length=1, max_length=8)
+
+
+class AnalyzeRequest(BaseModel):
+    # Optional same-domain chapter index/details page. If absent, visit base URL.
+    page_url: str | None = Field(default=None, max_length=1500)

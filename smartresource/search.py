@@ -27,15 +27,53 @@ def extract_search_results(site: dict, html: str, search_url: str):
     return results
 
 
+def heuristic_search_results(site: dict, html: str, search_url: str, keyword: str):
+    """Fallback for GET search forms without maintained selectors.
+
+    Candidates are deliberately limited to links containing the full search
+    string. This can miss books; do not call them complete or validated.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    host = urlsplit(site["base_url"]).hostname
+    needle = "".join(keyword.casefold().split())
+    seen, result = set(), []
+    for a in soup.select("a[href]")[:8000]:
+        title = a.get_text(" ", strip=True)[:200]
+        if not title or len(title) < 2 or len(title) > 160:
+            continue
+        if needle not in "".join(title.casefold().split()):
+            continue
+        target = urljoin(search_url, (a.get("href") or "").strip())
+        parsed = urlsplit(target)
+        if parsed.scheme not in ("http", "https") or parsed.hostname != host:
+            continue
+        if target == search_url or target in seen:
+            continue
+        seen.add(target)
+        result.append({
+            "title": title, "url": target, "site_id": site["id"],
+            "site_name": site["name"], "kind": site["kind"],
+            "extraction": "heuristic"
+        })
+        if len(result) == 40:
+            break
+    return result
+
+
 async def fetch_site_results(site: dict, keyword: str):
-    fields = ("search_url_template", "item_selector", "title_selector", "link_selector")
-    if not all(site.get(k) for k in fields):
-        return [], "未配置站内搜索规则（仍可原网页浏览）"
+    if not site.get("search_url_template"):
+        return [], "未发现已保存的站内搜索地址（仍可原网页浏览）"
     url = site["search_url_template"].replace("{q}", quote_plus(keyword)).replace("{page}", "1")
     try:
         html = await fetch_html(url, urlsplit(site["base_url"]).hostname)
-        rows = extract_search_results(site, html, url)
-        return rows, None if rows else "网页返回成功，但没有匹配搜索结果"
+        fields = ("item_selector", "title_selector", "link_selector")
+        if all(site.get(k) for k in fields):
+            rows = extract_search_results(site, html, url)
+            warning = None if rows else "搜索返回成功，但 CSS 规则未提取到结果"
+        else:
+            rows = heuristic_search_results(site, html, url, keyword)
+            warning = "使用关键字链接匹配，属于未经验证的候选结果，建议补充 CSS 规则"
+        return rows, warning
     except Exception as exc:
         return [], f"检索失败：{type(exc).__name__} - {str(exc)[:120]}"
 

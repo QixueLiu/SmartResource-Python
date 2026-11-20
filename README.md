@@ -17,6 +17,16 @@ pytest -q
 
 将 \`SMARTRESOURCE_API_TOKEN\` 设置为随机、足够长的值；不设置则仅健康检查可用，其他 API 返回 503。Android APP 在设置页填写 Token。需要手机外网访问时，优先通过 Tailscale；仅允许 Tailscale 网络访问该端口，**切勿把 8000 直接暴露公网**。
 
+## 新增：网页结构检测（0.3）
+
+`POST /api/sites/{id}/analyze`（需 X-API-Key）
+
+请求 `{}` 检测网站首页，或 `{"page_url":"https://已配置域名/book/123"}` 检测单个目录页面。
+
+返回 `kind_guess`（小说/视频/混合/未知）、`search_candidate`（仅根据 GET 表单推断站内搜索 URL）、`toc_candidate`（根据章节链接推断目录 CSS）、`notes`。**仅返回候选规则，不会写入数据库或自动修改已有配置。**
+
+Android APP 可点击「分析」，检查候选后应用到编辑表单，最终由用户明确保存。网站有站内 GET 搜索模板但未配置结果 CSS 时，服务端会对搜索响应尝试同域名关键词链接匹配，并将结果标记为 `heuristic`；误报和漏报均有可能。POST 表单、JS 渲染、站外跳转及访问限制均不自动绕过。
+
 ## API
 
 | API | 说明 |
