@@ -3,7 +3,14 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DB = "./data/smartresource.db"
-SITE_COLUMNS = ("toc_item_selector", "toc_title_selector", "toc_link_selector")
+OPTIONAL_COLUMNS = {
+    "toc_item_selector": "TEXT",
+    "toc_title_selector": "TEXT",
+    "toc_link_selector": "TEXT",
+    "scan_status": "TEXT NOT NULL DEFAULT 'pending'",
+    "scan_message": "TEXT",
+    "scan_checked_at": "TEXT",
+}
 
 
 def connect():
@@ -30,10 +37,15 @@ def initialize():
             link_selector TEXT,
             toc_item_selector TEXT,
             toc_title_selector TEXT,
-            toc_link_selector TEXT
+            toc_link_selector TEXT,
+            scan_status TEXT NOT NULL DEFAULT 'pending',
+            scan_message TEXT,
+            scan_checked_at TEXT
         )
         """)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(sites)")}
-        for column in SITE_COLUMNS:
+        for column, kind in OPTIONAL_COLUMNS.items():
             if column not in columns:
-                conn.execute(f"ALTER TABLE sites ADD COLUMN {column} TEXT")
+                conn.execute(f"ALTER TABLE sites ADD COLUMN {column} {kind}")
+        # The app server may have stopped while analyzing; these scans can be retried.
+        conn.execute("UPDATE sites SET scan_status='pending' WHERE scan_status IN ('queued','running')")

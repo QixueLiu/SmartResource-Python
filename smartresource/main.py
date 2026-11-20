@@ -3,14 +3,15 @@ import hmac
 import sqlite3
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
-from fastapi import FastAPI, HTTPException, Header, Depends, Query
+from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
 from .analyzer import analyze_html
 from .fetcher import fetch_html
+from .autoconfig import scan_sites, enqueue_scan, pending_site_ids
 
 
 @asynccontextmanager
@@ -19,7 +20,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.4.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -51,7 +52,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.3.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.4.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -62,7 +63,7 @@ def sites():
 
 
 @app.post("/api/sites", status_code=201, dependencies=[Depends(require_token)])
-def create_site(site: SiteIn):
+def create_site(site: SiteIn, background_tasks: BackgroundTasks, auto_scan: bool = True):
     try:
         validate_site(site)
     except ValueError as exc:
@@ -71,6 +72,10 @@ def create_site(site: SiteIn):
         if not store_site(conn, site):
             raise HTTPException(409, "此网站网址已存在")
         row = conn.execute("SELECT * FROM sites WHERE id = last_insert_rowid()").fetchone()
+    if auto_scan:
+        queued = enqueue_scan([row["id"]])
+        if queued:
+            background_tasks.add_task(scan_sites, queued)
     return output_site(row)
 
 
@@ -108,26 +113,32 @@ def delete_site(site_id: int):
 
 
 @app.post("/api/sites/import", dependencies=[Depends(require_token)])
-def import_sites(items: list[SiteIn]):
+def import_sites(items: list[SiteIn], background_tasks: BackgroundTasks, auto_scan: bool = True):
     if len(items) > 1000:
         raise HTTPException(413, "一次最多导入 1000 条")
-    created, failed = 0, []
+    created, failed, new_ids = 0, [], []
     with connect() as conn:
         for index, site in enumerate(items):
             try:
                 validate_site(site)
-                created += int(store_site(conn, site))
+                if store_site(conn, site):
+                    created += 1
+                    new_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             except (ValueError, sqlite3.Error) as exc:
                 failed.append({"index": index, "reason": str(exc)[:150]})
-    return {"created": created, "existing": len(items) - created - len(failed), "failed": failed}
+    queued = enqueue_scan(new_ids) if auto_scan else []
+    if queued:
+        background_tasks.add_task(scan_sites, queued)
+    return {"created": created, "existing": len(items)-created-len(failed),
+            "failed": failed, "auto_scan_queued": len(queued)}
 
 
 @app.post("/api/sites/import-text", dependencies=[Depends(require_token)])
-def import_text(data: UrlImport):
+def import_text(data: UrlImport, background_tasks: BackgroundTasks, auto_scan: bool = True):
     lines = [line.strip() for line in data.text.splitlines() if line.strip()]
     if len(lines) > 1000:
         raise HTTPException(413, "一次最多导入 1000 行")
-    created, failed = 0, []
+    created, failed, new_ids = 0, [], []
     with connect() as conn:
         for index, line in enumerate(lines):
             try:
@@ -143,10 +154,26 @@ def import_text(data: UrlImport):
                 # A website is identified by the public origin, not by an article URL.
                 origin = f"{parsed.scheme}://{parsed.netloc}"
                 site = SiteIn(name=name[:100], base_url=origin, kind=data.kind)
-                created += int(store_site(conn, site))
+                if store_site(conn, site):
+                    created += 1
+                    new_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             except (ValueError, sqlite3.Error) as exc:
                 failed.append({"line": index + 1, "reason": str(exc)[:150]})
-    return {"created": created, "existing": len(lines) - created - len(failed), "failed": failed}
+    queued = enqueue_scan(new_ids) if auto_scan else []
+    if queued:
+        background_tasks.add_task(scan_sites, queued)
+    return {"created": created, "existing": len(lines)-created-len(failed),
+            "failed": failed, "auto_scan_queued": len(queued)}
+
+
+@app.post("/api/sites/scan", dependencies=[Depends(require_token)])
+async def scan_sites_route(request: ScanRequest, background_tasks: BackgroundTasks):
+    ids = request.site_ids if request.site_ids else pending_site_ids(request.limit)
+    queued = enqueue_scan(ids)
+    if queued:
+        background_tasks.add_task(scan_sites, queued)
+    return {"queued": len(queued), "site_ids": queued,
+            "note": "后台最多并行检测 2 个站点。通过 GET /api/sites 查看每站状态；候选搜索规则并非验证成功。"}
 
 
 @app.post("/api/sites/{site_id}/analyze", dependencies=[Depends(require_token)])

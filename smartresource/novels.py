@@ -4,6 +4,7 @@ import re
 from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 from .fetcher import fetch_html
+from .analyzer import detect_toc
 
 CHAPTER_NUMBER = re.compile(r"第\s*(\d{1,6})\s*[章节回]")
 
@@ -68,7 +69,23 @@ async def compare(sites_by_id: dict, candidates):
                 if urlsplit(candidate.url).hostname != host:
                     raise ValueError("目录网址和站点域名不匹配")
                 html = await fetch_html(candidate.url, host)
-                return analyze_toc(site, html, candidate.url)
+                auto_discovered = False
+                working_site = site
+                if not site.get("toc_item_selector") or not site.get("toc_link_selector"):
+                    suggestion = detect_toc(BeautifulSoup(html, "html.parser"), candidate.url, host)
+                    if not suggestion:
+                        raise ValueError("该页面暂未识别出有效章节目录，仍可使用原网页")
+                    working_site = {**site,
+                                    "toc_item_selector": suggestion["toc_item_selector"],
+                                    "toc_title_selector": suggestion["toc_title_selector"],
+                                    "toc_link_selector": suggestion["toc_link_selector"]}
+                    auto_discovered = True
+                result = analyze_toc(working_site, html, candidate.url)
+                result["auto_discovered"] = auto_discovered
+                if auto_discovered:
+                    result["confidence"] = "low" if result["confidence"] == "low" else "medium"
+                    result["scope"] += "；目录 CSS 来自本次自动发现，没有写入配置"
+                return result
             except Exception as exc:
                 return {"site_id": candidate.site_id, "site_name": site["name"], "url": candidate.url, "error": str(exc)[:180]}
 
