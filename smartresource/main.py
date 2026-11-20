@@ -3,6 +3,7 @@ import hmac
 import sqlite3
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Literal
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
@@ -398,10 +399,22 @@ async def analyze_site_ai(site_id: int, request: AnalyzeRequest):
 
 
 @app.get("/api/search", dependencies=[Depends(require_token)])
-async def search(q: str = Query(min_length=1, max_length=120)):
+async def search(
+    q: str = Query(min_length=1, max_length=120),
+    mode: Literal["fast", "full"] = "fast",
+    kind: Literal["all", "novel", "video"] = "all",
+    refresh: bool = False,
+):
+    if not q.strip():
+        raise HTTPException(422, "请输入要搜索的作品名称")
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM sites WHERE enabled=1 ORDER BY id DESC LIMIT 500").fetchall()
-    return await search_all([dict(row) for row in rows], q)
+        rows = conn.execute(
+            "SELECT * FROM sites WHERE enabled=1 ORDER BY id DESC LIMIT 500"
+        ).fetchall()
+    return await search_all(
+        [dict(row) for row in rows], q.strip(),
+        mode=mode, kind=kind, refresh=refresh
+    )
 
 
 @app.post("/api/novels/compare", dependencies=[Depends(require_token)])
