@@ -6,14 +6,14 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest, VideoFavoriteCreate, VideoQuickSave, VideoTitlePatch, VideoLastPage
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, BookQuickSave, ShelfProgress, AlternativesRequest, VideoFavoriteCreate, VideoQuickSave, VideoTitlePatch, VideoLastPage
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
 from .reader import extract_reader_page, expand_toc_result
 from .fallback_sources import find_sources
 from .site_health import health_map, site_health_detail, observe, classify_error
-from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
+from .shelf import add_book, save_current_book_page, list_books, save_progress, remove_book, ShelfInputError
 from .video_library import (
     list_videos, save_video, save_current_video_page, rename_video, reset_video_page, remember_video_page, delete_video, VideoLibraryError
 )
@@ -467,6 +467,15 @@ def shelf_add(book: ShelfCreate):
     # Re-adding a book does not reset its chapter or scroll percentage.
     try:
         return add_book(book.site_id, book.book_url, book.title)
+    except ShelfInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/shelf/quick-save", status_code=201, dependencies=[Depends(require_token)])
+def shelf_quick_save(request: BookQuickSave):
+    """Save a user-selected browser URL. No fetching or site scanning."""
+    try:
+        return save_current_book_page(request.url, request.title)
     except ShelfInputError as exc:
         raise HTTPException(422, str(exc)) from exc
 
