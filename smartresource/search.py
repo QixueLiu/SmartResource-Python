@@ -18,9 +18,11 @@ FULL_SEARCH_SECONDS = 26.0
 FULL_SEARCH_CONCURRENCY = 16
 CACHE_TTL_SECONDS = 90.0
 CACHE_MAX_ENTRIES = 32
+SITE_CACHE_MAX_ENTRIES = 160
 
-# One user, one Python service: tiny process-local cache, no Redis or new DB.
+# One user, one Python service: process-local only, no Redis or new DB.
 _search_cache = {}
+_site_cache = {}
 
 
 def _normal_title(value: str) -> str:
@@ -173,6 +175,42 @@ async def fetch_site_results(site: dict, keyword: str):
         return [], f"检索失败：{reason}（请检查站点或稍后重试）"
 
 
+def _site_cache_key(site: dict, keyword: str):
+    fields = (
+        "id", "name", "base_url", "kind", "search_url_template",
+        "item_selector", "title_selector", "link_selector", "scan_status"
+    )
+    return (os.getenv("SMARTRESOURCE_DB", ""), id(fetch_site_results), keyword,
+            tuple(site.get(field) for field in fields))
+
+
+def _read_site_cache(key):
+    value = _site_cache.get(key)
+    if value is None:
+        return None
+    expires, payload = value
+    if expires <= time.monotonic():
+        _site_cache.pop(key, None)
+        return None
+    return copy.deepcopy(payload)
+
+
+def _write_site_cache(key, payload):
+    # Do not make transient network outages or timeouts sticky for 90 seconds.
+    warning = payload[1]
+    if warning and (
+        warning.startswith("检索失败：") or "超过单站" in warning
+    ):
+        return
+    now = time.monotonic()
+    for old_key, (expires, _) in list(_site_cache.items()):
+        if expires <= now:
+            _site_cache.pop(old_key, None)
+    while len(_site_cache) >= SITE_CACHE_MAX_ENTRIES:
+        _site_cache.pop(next(iter(_site_cache)))
+    _site_cache[key] = (now + CACHE_TTL_SECONDS, copy.deepcopy(payload))
+
+
 async def search_all(
     sites: list[dict], q: str, mode: str = "fast", kind: str = "all",
     refresh: bool = False,
@@ -221,6 +259,7 @@ async def search_all(
             "completed_sites": 0, "searchable_sites": 0,
             "unconfigured_sites": unconfigured,
             "skipped_sites": 0, "timed_out_sites": 0,
+            "reused_sites": 0,
             "mode": mode, "kind": kind, "cached": False,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
         }
@@ -230,13 +269,20 @@ async def search_all(
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one(site):
+        cache_key = _site_cache_key(site, query)
+        if not refresh:
+            cached_site = _read_site_cache(cache_key)
+            if cached_site is not None:
+                return (*cached_site, True)
         async with semaphore:
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     fetch_site_results(site, query), timeout=PER_SITE_SECONDS
                 )
+                _write_site_cache(cache_key, result)
+                return (*result, False)
             except asyncio.TimeoutError:
-                return [], "网站响应超过单站6秒限制"
+                return [], "网站响应超过单站6秒限制", False
 
     tasks = {asyncio.create_task(one(site)): site for site in chosen}
     done, pending = await asyncio.wait(tasks, timeout=budget)
@@ -247,13 +293,16 @@ async def search_all(
 
     by_id = {}
     timeout_count = len(pending)
+    reused_count = 0
     for task in done:
         site = tasks[task]
         try:
             record = task.result()
         except Exception:
-            record = ([], "站点请求异常")
-        by_id[site["id"]] = record
+            record = ([], "站点请求异常", False)
+        by_id[site["id"]] = record[:2]
+        if record[2]:
+            reused_count += 1
         if record[1] and "超过单站6秒" in record[1]:
             timeout_count += 1
 
@@ -293,6 +342,7 @@ async def search_all(
         "unconfigured_sites": unconfigured,
         "skipped_sites": skipped,
         "timed_out_sites": timeout_count,
+        "reused_sites": reused_count,
         "mode": mode, "kind": kind, "cached": False,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
     }
