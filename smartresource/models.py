@@ -87,5 +87,10 @@ class VideoFavoriteCreate(BaseModel):
     video_url: str = Field(min_length=8, max_length=1500)
 
 
+class VideoQuickSave(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    url: str = Field(min_length=8, max_length=1500)
+
+
 class VideoLastPage(BaseModel):
     url: str = Field(min_length=8, max_length=1500)
