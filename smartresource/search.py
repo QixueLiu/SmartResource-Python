@@ -356,6 +356,11 @@ async def search_all(
     concurrency = 8 if mode == "fast" else FULL_SEARCH_CONCURRENCY
     chosen = ordered[:limit]
     skipped = len(ordered) - len(chosen)
+    paginated_sites = sum(
+        "{q}" in (site.get("search_url_template") or "") and
+        "{page}" in (site.get("search_url_template") or "")
+        for site in chosen
+    )
 
     if not chosen:
         response = {
@@ -365,6 +370,7 @@ async def search_all(
             "skipped_sites": 0, "timed_out_sites": 0,
             "reused_sites": 0,
             "extra_pages_fetched": 0,
+            "paginated_sites": 0,
             "mode": mode, "kind": kind, "cached": False,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
         }
@@ -512,6 +518,7 @@ async def search_all(
         "timed_out_sites": timeout_count,
         "reused_sites": reused_count,
         "extra_pages_fetched": extra_pages_fetched,
+        "paginated_sites": paginated_sites,
         "mode": mode, "kind": kind, "cached": False,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
     }
