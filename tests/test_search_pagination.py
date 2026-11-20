@@ -54,6 +54,7 @@ def test_full_fetches_up_to_three_pages_reusing_first_and_deduplicating(
     fast = asyncio.run(search.search_all([site], "三体", mode="fast"))
     assert len(fast["items"]) == 1
     assert fast["extra_pages_fetched"] == 0
+    assert fast["paginated_sites"] == 1
     assert calls == [("first", "三体")]
 
     full = asyncio.run(search.search_all([site], "三体", mode="full"))
@@ -63,6 +64,7 @@ def test_full_fetches_up_to_three_pages_reusing_first_and_deduplicating(
     ]
     assert full["reused_sites"] == 1
     assert full["extra_pages_fetched"] == 2
+    assert full["paginated_sites"] == 1
     assert calls == [("first", "三体"), ("page", 2), ("page", 3)]
 
     repeated = asyncio.run(search.search_all([site], "三体", mode="full"))
@@ -92,6 +94,7 @@ def test_sites_without_page_parameter_do_not_get_guessed_page_urls(
     full = asyncio.run(search.search_all([site], "三体", mode="full"))
     assert len(full["items"]) == 1
     assert full["extra_pages_fetched"] == 0
+    assert full["paginated_sites"] == 0
 
 
 def test_empty_second_page_stops_without_page_three(tmp_path, monkeypatch):
