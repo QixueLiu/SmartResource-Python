@@ -7,12 +7,13 @@ import re
 import unicodedata
 
 _YEAR = re.compile(
-    r"(?<![0-9A-Za-z\u4e00-\u9fff])((?:19|20)\d{2})"
+    r"(?<![0-9A-Za-z\u4e00-\u9fff])((?:19|20)\d{2})(?:年)?"
     r"(?![0-9A-Za-z\u4e00-\u9fff])"
 )
 _SEASON = re.compile(
     r"第\s*([0-9一二三四五六七八九十两]+)\s*季"
-    r"|\bseason\s*0?([0-9]{1,2})\b",
+    r"|\bseason\s*0?([0-9]{1,2})\b"
+    r"|\bS0?([0-9]{1,2})E[0-9]{1,3}\b",
     re.I
 )
 _EDITION = re.compile(r"电影版|电视剧版|动画版|剧场版|真人版|纪录片版")
@@ -41,7 +42,7 @@ def _season_number(text: str) -> int | None:
     found = _SEASON.search(text)
     if not found:
         return None
-    raw = found.group(1) or found.group(2)
+    raw = found.group(1) or found.group(2) or found.group(3)
     if raw.isdigit():
         value = int(raw)
         return value if 1 <= value <= 99 else None
