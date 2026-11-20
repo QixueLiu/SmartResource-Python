@@ -3,6 +3,7 @@ from urllib.parse import urljoin, quote_plus, urlsplit
 from bs4 import BeautifulSoup
 from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
+from .site_health import observe, classify_error, health_map, rank_sites
 
 
 def extract_search_results(site: dict, html: str, search_url: str):
@@ -74,9 +75,18 @@ async def fetch_site_results(site: dict, keyword: str):
         else:
             rows = heuristic_search_results(site, html, url, keyword)
             warning = "使用关键字链接匹配，属于未经验证的候选结果，建议补充 CSS 规则"
+        if rows and all(site.get(k) for k in fields):
+            observe(site["id"], "search", "success", "ok")
+        elif rows:
+            observe(site["id"], "search", "neutral", "heuristic_results")
+        else:
+            # Empty results may be a valid response to the user's query.
+            observe(site["id"], "search", "neutral", "empty_results")
         return rows, warning
     except Exception as exc:
-        return [], f"检索失败：{type(exc).__name__} - {str(exc)[:120]}"
+        reason = classify_error(exc)
+        observe(site["id"], "search", "failure", reason)
+        return [], f"检索失败：{reason}（请检查站点或稍后重试）"
 
 
 async def search_all(sites: list[dict], q: str):
@@ -86,13 +96,16 @@ async def search_all(sites: list[dict], q: str):
         async with semaphore:
             return await fetch_site_results(site, q)
 
-    outcomes = await asyncio.gather(*(one(site) for site in sites))
+    # Prefer sites with actual successes; never suppress a poorly scoring site.
+    ordered = rank_sites(sites)
+    outcomes = await asyncio.gather(*(one(site) for site in ordered))
+    health = health_map([site["id"] for site in ordered])
     results, seen, warnings = [], set(), []
-    for site, (items, warning) in zip(sites, outcomes):
+    for site, (items, warning) in zip(ordered, outcomes):
         if warning:
             warnings.append({"site_id": site["id"], "site_name": site["name"], "message": warning})
         for item in items:
             if item["url"] not in seen:
                 seen.add(item["url"])
-                results.append(item)
+                results.append({**item, "source_health": health[site["id"]]})
     return {"items": results, "warnings": warnings, "searched_sites": len(sites)}

@@ -14,6 +14,7 @@ from .browser_renderer import fetch_analysis_html
 from .fetcher import fetch_html
 from .reader import extract_reader_page, expand_toc_result
 from .search import fetch_site_results
+from .site_health import rank_sites, health_map
 
 _ARABIC = re.compile(r"第\s*(\d{1,6})\s*[章节回]|chapter\s*(\d{1,6})", re.I)
 _CHINESE = re.compile(r"第\s*([零〇一二两三四五六七八九十百千]{1,12})\s*[章节回]")
@@ -86,7 +87,8 @@ async def find_sources(
     search_sites = [s for s in sites if s["id"] != book["site_id"]
                     and s.get("enabled") and s.get("search_url_template")
                     and s.get("kind") in ("novel", "mixed", "other")]
-    search_sites = search_sites[:max(1, min(max_sites, 8))]
+    source_metrics = health_map([s["id"] for s in search_sites])
+    search_sites = rank_sites(search_sites, source_metrics)[:max(1, min(max_sites, 8))]
     sem = asyncio.Semaphore(2)
 
     async def inspect(site):
@@ -138,6 +140,7 @@ async def find_sources(
                     "chapter_url": entry["url"], "chapter_title": extracted["title"],
                     "confidence": level,
                     "verified_extract": True,
+                    "source_health": source_metrics.get(site["id"]),
                     "reason": ("作品名一致，章节编号及标题一致，且已验证可提取正文"
                                if level == "exact_chapter"
                                else "作品名一致，章节编号一致且正文可提取；章节标题证据不足"),

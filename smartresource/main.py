@@ -11,6 +11,7 @@ from .search import search_all
 from .novels import compare
 from .reader import extract_reader_page, expand_toc_result
 from .fallback_sources import find_sources
+from .site_health import health_map, site_health_detail, observe, classify_error
 from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
 from .analyzer import analyze_html
 from .fetcher import fetch_html
@@ -27,7 +28,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.10.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.11.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -44,8 +45,12 @@ def require_token(x_api_key: str | None = Header(default=None)):
         raise HTTPException(401, "API Token 无效")
 
 
-def output_site(row):
-    return {**dict(row), "enabled": bool(row["enabled"])}
+def output_site(row, health=None):
+    return {
+        **dict(row),
+        "enabled": bool(row["enabled"]),
+        "health": health if health is not None else health_map([row["id"]])[row["id"]],
+    }
 
 
 def store_site(conn, site: SiteIn):
@@ -59,14 +64,15 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.10.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.11.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
 def sites():
     with connect() as conn:
         rows = conn.execute("SELECT * FROM sites ORDER BY id DESC").fetchall()
-    return {"items": [output_site(row) for row in rows]}
+    health = health_map([row["id"] for row in rows])
+    return {"items": [output_site(row, health[row["id"]]) for row in rows]}
 
 
 @app.post("/api/sites", status_code=201, dependencies=[Depends(require_token)])
@@ -114,6 +120,8 @@ def update_site(site_id: int, patch: SitePatch):
 def delete_site(site_id: int):
     with connect() as conn:
         count = conn.execute("DELETE FROM sites WHERE id=?", (site_id,)).rowcount
+        if count:
+            conn.execute("DELETE FROM site_health_events WHERE site_id=?", (site_id,))
     if not count:
         raise HTTPException(404, "站点不存在")
     return {"deleted": True, "id": site_id}
@@ -171,6 +179,25 @@ def import_text(data: UrlImport, background_tasks: BackgroundTasks, auto_scan: b
         background_tasks.add_task(scan_sites, queued)
     return {"created": created, "existing": len(lines)-created-len(failed),
             "failed": failed, "auto_scan_queued": len(queued)}
+
+
+@app.get("/api/sites/health", dependencies=[Depends(require_token)])
+def sites_health():
+    with connect() as conn:
+        rows = conn.execute("SELECT id, name FROM sites ORDER BY id DESC").fetchall()
+    data = health_map([row["id"] for row in rows])
+    return {"items": [
+        {"name": row["name"], **data[row["id"]]} for row in rows
+    ], "window_days": 30}
+
+
+@app.get("/api/sites/{site_id}/health", dependencies=[Depends(require_token)])
+def single_site_health(site_id: int):
+    with connect() as conn:
+        row = conn.execute("SELECT id FROM sites WHERE id=?", (site_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "站点不存在")
+    return site_health_detail(site_id)
 
 
 @app.post("/api/sites/scan", dependencies=[Depends(require_token)])
@@ -319,14 +346,19 @@ async def reader_open(request: ReaderRequest):
                 result, site, fetch_followup, max_pages=request.max_toc_pages
             )
         result["fetch_mode"] = fetch_mode
+        if result.get("kind") in ("chapter", "toc"):
+            observe(site["id"], "reader", "success", "ok")
+        else:
+            observe(site["id"], "reader", "failure", "parse_failure")
         return result
     except HTTPException:
         raise
     except ValueError as exc:
         raise HTTPException(422, str(exc)[:180]) from exc
     except Exception as exc:
+        observe(site["id"], "reader", "failure", classify_error(exc))
         raise HTTPException(
-            502, "网页正文提取未完成，请使用原网页：" + str(exc)[:130]
+            502, "网页正文提取未完成，请使用原网页：" + type(exc).__name__
         ) from exc
 
 
