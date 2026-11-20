@@ -69,6 +69,11 @@ class ShelfCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
+class BookQuickSave(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    url: str = Field(min_length=8, max_length=1500)
+
+
 class ShelfProgress(BaseModel):
     chapter_url: str = Field(min_length=8, max_length=1500)
     chapter_title: str = Field(default="", max_length=200)
