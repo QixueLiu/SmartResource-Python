@@ -50,7 +50,9 @@ def save_video(site_id: int, title: str, video_url: str):
                (site_id, title, video_url, last_url, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(site_id, video_url)
-               DO UPDATE SET title=excluded.title""",
+               DO UPDATE SET title=CASE
+                   WHEN video_library.title_custom=1 THEN video_library.title
+                   ELSE excluded.title END""",
             (site_id, title.strip(), video_url, video_url, now, now),
         )
         row = conn.execute(
@@ -58,6 +60,40 @@ def save_video(site_id: int, title: str, video_url: str):
             (site_id, video_url),
         ).fetchone()
     return dict(row)
+
+
+def rename_video(video_id: int, title: str):
+    """Explicit user titles override future automatic or repeat bookmarking."""
+    cleaned = title.strip()
+    if not cleaned:
+        raise VideoLibraryError("视频名称不能为空")
+    if len(cleaned) > 200:
+        raise VideoLibraryError("视频名称最多200字")
+    with connect() as conn:
+        changed = conn.execute(
+            "UPDATE video_library SET title=?, title_custom=1 WHERE id=?",
+            (cleaned, video_id),
+        ).rowcount
+        if not changed:
+            raise KeyError("视频收藏不存在")
+        return dict(conn.execute(
+            "SELECT * FROM video_library WHERE id=?", (video_id,)
+        ).fetchone())
+
+
+def reset_video_page(video_id: int):
+    """Forget the last visited page without removing the favorite itself."""
+    with connect() as conn:
+        changed = conn.execute(
+            """UPDATE video_library SET last_url=video_url, updated_at=?
+               WHERE id=?""",
+            (datetime.now(timezone.utc).isoformat(), video_id),
+        ).rowcount
+        if not changed:
+            raise KeyError("视频收藏不存在")
+        return dict(conn.execute(
+            "SELECT * FROM video_library WHERE id=?", (video_id,)
+        ).fetchone())
 
 
 def remember_video_page(video_id: int, url: str):
@@ -71,10 +107,11 @@ def remember_video_page(video_id: int, url: str):
             raise KeyError("视频收藏不存在")
         _check_site_url(url, record["site_url"])
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            "UPDATE video_library SET last_url=?, updated_at=? WHERE id=?",
-            (url, now, video_id)
-        )
+        if url != record["last_url"]:
+            conn.execute(
+                "UPDATE video_library SET last_url=?, updated_at=? WHERE id=?",
+                (url, now, video_id)
+            )
         updated = conn.execute("SELECT * FROM video_library WHERE id=?", (video_id,)).fetchone()
     return dict(updated)
 
