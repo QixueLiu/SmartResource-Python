@@ -36,7 +36,7 @@ def test_import_automatically_fills_get_search_form_without_css(client, monkeypa
     assert sites[0]["search_url_template"] == "https://books.example.org/search?q={q}"
     assert sites[0]["item_selector"] is None
     assert sites[0]["scan_status"] == "candidate"
-    assert "尚未验证" in sites[0]["scan_message"]
+    assert "无法自动验证" in sites[0]["scan_message"]
 
 
 def test_no_overwrite_and_recheck(client, monkeypatch):
