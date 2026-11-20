@@ -17,6 +17,29 @@ pytest -q
 
 将 \`SMARTRESOURCE_API_TOKEN\` 设置为随机、足够长的值；不设置则仅健康检查可用，其他 API 返回 503。Android APP 在设置页填写 Token。需要手机外网访问时，优先通过 Tailscale；仅允许 Tailscale 网络访问该端口，**切勿把 8000 直接暴露公网**。
 
+## 本地 Ollama AI 规则分析（0.7）
+
+本地 AI 模块默认关闭，不依赖云端 API。RTX 3050 8GB 主机可以先尝试一个轻量模型：
+
+~~~bash
+ollama pull qwen2.5-coder:3b
+ollama list
+export SMARTRESOURCE_AI_ENABLED=1
+export SMARTRESOURCE_OLLAMA_MODEL=qwen2.5-coder:3b
+export SMARTRESOURCE_OLLAMA_URL=http://127.0.0.1:11434
+~~~
+
+Linux 使用 export；Windows PowerShell 使用 $env:SMARTRESOURCE_AI_ENABLED='1' 等。启动 FastAPI 前也必须设置保密的 SMARTRESOURCE_API_TOKEN。
+
+- GET /api/ai/status：返回配置状态和模型名称（不代表模型已成功加载）。
+- POST /api/sites/{id}/ai-analyze：请求 {} 或 {'page_url':'https://同站网页'}，只分析已添加且启用的同域名网页。
+- Python 从 HTML 中提取无脚本、无输入值和无站外链接的精简结构，交给本机 Ollama 的 /api/generate JSON 模式。
+- AI 只建议搜索结果和章节目录的 CSS，服务器必须对当前网页验证选择器和同域名链接，否则丢弃。
+- 模型推理单进程串行；不会执行模型生成的代码，也不会保存模型提出的候选规则；用户在 Android 端检查并明确保存。
+- 不能解析登录、验证码、付费和 DRM；无法保证单页面验证代表全站可用。
+
+**安全要求**：只允许 localhost:11434。不要将 Ollama 11434 端口暴露到公网、LAN 或 Tailscale；Android 只访问需认证的 FastAPI。网页及其文字属于不可信输入，本地模型可能给出错误建议，必须以验证结果为准。
+
 ## 小说阅读模式（0.6）
 
 `POST /api/reader/open`，传入：

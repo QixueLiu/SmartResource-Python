@@ -16,6 +16,7 @@ from .browser_renderer import fetch_analysis_html
 from .verification import verify_search
 from datetime import datetime, timezone
 from .autoconfig import scan_sites, enqueue_scan, pending_site_ids
+from .ai_rules import enabled as ai_enabled, config as ai_config, suggest as ai_suggest
 
 
 @asynccontextmanager
@@ -24,7 +25,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.7.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -56,7 +57,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.6.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.7.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -230,6 +231,47 @@ async def verify_site_search(site_id: int):
         return {**result, "site_id": site_id, "fetch_mode": mode}
     except Exception as exc:
         raise HTTPException(502, "搜索验证失败：" + str(exc)[:160]) from exc
+
+
+
+@app.get("/api/ai/status", dependencies=[Depends(require_token)])
+def ai_status():
+    """Configuration only; it does not check whether the model is loaded."""
+    return {**ai_config(), "connection_tested": False}
+
+
+@app.post("/api/sites/{site_id}/ai-analyze", dependencies=[Depends(require_token)])
+async def analyze_site_ai(site_id: int, request: AnalyzeRequest):
+    """AI suggestions are validated on the DOM and NEVER saved automatically."""
+    if not ai_enabled():
+        raise HTTPException(503, "本地 AI 尚未启用：需要设置 SMARTRESOURCE_AI_ENABLED=1")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM sites WHERE id=? AND enabled=1", (site_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "未找到启用中的网站")
+    site = dict(row)
+    page_url = request.page_url or site["base_url"]
+    host = urlsplit(site["base_url"]).hostname
+    if validate_public_url(page_url) != host:
+        raise HTTPException(422, "AI 只能分析已添加站点的同域名网页")
+    try:
+        html, fetch_mode = await fetch_analysis_html(
+            page_url, host, http_fetch=fetch_html
+        )
+        baseline = analyze_html(html, page_url, site)
+        outcome = await ai_suggest(html, page_url)
+        baseline["ai_analysis"] = outcome
+        baseline["fetch_mode"] = fetch_mode
+        baseline["notes"].append("AI 候选只在当前 DOM 校验，不自动保存或覆盖配置")
+        return baseline
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            502, "AI 网页分析失败，请使用普通规则或原网页：" + str(exc)[:150]
+        ) from exc
 
 
 @app.get("/api/search", dependencies=[Depends(require_token)])
