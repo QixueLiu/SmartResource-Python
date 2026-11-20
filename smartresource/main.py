@@ -11,6 +11,9 @@ from .search import search_all
 from .novels import compare
 from .analyzer import analyze_html
 from .fetcher import fetch_html
+from .browser_renderer import fetch_analysis_html
+from .verification import verify_search
+from datetime import datetime, timezone
 from .autoconfig import scan_sites, enqueue_scan, pending_site_ids
 
 
@@ -20,7 +23,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.5.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -52,7 +55,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.4.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.5.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -188,14 +191,41 @@ async def analyze_site(site_id: int, request: AnalyzeRequest):
     try:
         if validate_public_url(page_url) != host:
             raise ValueError("只允许分析当前站点同域名的网址")
-        html = await fetch_html(page_url, host)
-        return analyze_html(html, page_url, site)
+        html, mode = await fetch_analysis_html(page_url, host, http_fetch=fetch_html)
+        result = analyze_html(html, page_url, site)
+        result["fetch_mode"] = mode
+        return result
     except ValueError as exc:
         if "只允许分析" in str(exc) or "不允许" in str(exc) or "仅支持" in str(exc):
             raise HTTPException(422, str(exc)) from exc
         raise HTTPException(502, "网站结构分析失败：" + str(exc)[:180]) from exc
     except Exception as exc:
         raise HTTPException(502, "目标网站访问或解析失败：" + str(exc)[:180]) from exc
+
+
+@app.post("/api/sites/{site_id}/verify-search", dependencies=[Depends(require_token)])
+async def verify_site_search(site_id: int):
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM sites WHERE id=? AND enabled=1", (site_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "没有找到启用中的网站")
+    site = dict(row)
+    if not site.get("search_url_template"):
+        raise HTTPException(422, "该站点尚未配置站内搜索入口")
+    host = urlsplit(site["base_url"]).hostname
+    try:
+        home, mode = await fetch_analysis_html(site["base_url"], host, http_fetch=fetch_html)
+        result = await verify_search(site, home, fetch=fetch_html)
+        with connect() as conn:
+            conn.execute(
+                """UPDATE sites SET scan_status=?, scan_message=?, scan_checked_at=?
+                   WHERE id=? AND enabled=1 AND search_url_template=?""",
+                (result["status"], result["message"],
+                 datetime.now(timezone.utc).isoformat(), site_id, site["search_url_template"])
+            )
+        return {**result, "site_id": site_id, "fetch_mode": mode}
+    except Exception as exc:
+        raise HTTPException(502, "搜索验证失败：" + str(exc)[:160]) from exc
 
 
 @app.get("/api/search", dependencies=[Depends(require_token)])

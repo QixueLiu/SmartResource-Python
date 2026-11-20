@@ -17,6 +17,23 @@ pytest -q
 
 将 \`SMARTRESOURCE_API_TOKEN\` 设置为随机、足够长的值；不设置则仅健康检查可用，其他 API 返回 503。Android APP 在设置页填写 Token。需要手机外网访问时，优先通过 Tailscale；仅允许 Tailscale 网络访问该端口，**切勿把 8000 直接暴露公网**。
 
+## 自动搜索样本验证和动态网页分析（0.5）
+
+导入网站后，若发现同域名 GET 搜索表单，会尝试从首页作品链接选择一个标题作为正向样本，在原站搜索并检查是否返回对应作品 URL。通过则标记为 `probe_passed`；未找到样本或不匹配则仍是 `candidate`。**这是单次样本检查，不代表全站搜索正确。** 已有人工规则不会被覆盖。
+
+`POST /api/sites/{id}/verify-search` 可以重新检查单个站点。
+
+Playwright 是可选模块，默认不开启。若要对可信站点尝试 JavaScript 渲染：
+
+```bash
+pip install -e '.[browser]'
+python -m playwright install chromium
+# Linux: export SMARTRESOURCE_ENABLE_BROWSER=1
+# Windows PowerShell: $env:SMARTRESOURCE_ENABLE_BROWSER='1'
+```
+
+仅对静态抓取失败或明显的 JS 空壳尝试 Chromium；限制同域名请求、禁止下载和媒体资源、禁用 Service Worker。网页依赖跨域 CDN 时可能无法正常渲染。动态执行第三方 JavaScript 具有风险，务必只在隔离、低权限环境中为可信站点开启。此限制不能保证防止所有 DNS rebinding 和网络旁路，不应部署到高信任内网。不得绕过登录、反爬验证或 DRM。
+
 ## 自动网站配置（0.4）
 
 添加网站或批量导入网址后，服务器默认在后台**自动扫描新网站的公开 HTML 首页**，不再需要逐个点击「分析」并填写搜索地址。

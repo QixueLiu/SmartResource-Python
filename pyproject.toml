@@ -1,7 +1,7 @@
 [project]
 name = "smartresource-python"
-version = "0.2.0"
-description = "Self-hosted site index, search and novel table-of-contents analysis for SmartResource Android"
+version = "0.5.0"
+description = "Local self-hosted website search and analysis for SmartResource Android"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1.0",
@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+browser = ["playwright>=1.50,<2.0"]
 
 [build-system]
 requires = ["setuptools>=70"]
