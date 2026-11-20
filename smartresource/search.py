@@ -144,13 +144,22 @@ async def fetch_site_results(site: dict, keyword: str):
     try:
         html, _ = await fetch_analysis_html(url, urlsplit(site["base_url"]).hostname, http_fetch=fetch_html)
         fields = ("item_selector", "title_selector", "link_selector")
-        if all(site.get(k) for k in fields):
+        verified_css = all(site.get(k) for k in fields)
+        if verified_css:
             rows = extract_search_results(site, html, url)
-            warning = None if rows else "搜索返回成功，但 CSS 规则未提取到结果"
+            warning = None
+            if not rows:
+                # A site may change its CSS without changing its GET search URL.
+                # Try a conservative title-link fallback before giving up.
+                rows = heuristic_search_results(site, html, url, keyword)
+                warning = (
+                    "CSS 规则未命中，已回退到未经验证的关键词链接候选"
+                    if rows else "无匹配结果，或当前站点 CSS 规则已变化"
+                )
         else:
             rows = heuristic_search_results(site, html, url, keyword)
             warning = "使用关键字链接匹配，属于未经验证的候选结果，建议补充 CSS 规则"
-        if rows and all(site.get(k) for k in fields):
+        if rows and verified_css and warning is None:
             observe(site["id"], "search", "success", "ok")
         elif rows:
             observe(site["id"], "search", "neutral", "heuristic_results")
