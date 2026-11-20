@@ -74,5 +74,18 @@ def initialize():
         """)
         conn.execute("""CREATE INDEX IF NOT EXISTS ix_health_site_date
             ON site_health_events(site_id, observed_at DESC)""")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_library (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            video_url TEXT NOT NULL,
+            last_url TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(site_id, video_url)
+        )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_video_library_updated ON video_library(updated_at)")
         # The app server may have stopped while analyzing; these scans can be retried.
         conn.execute("UPDATE sites SET scan_status='pending' WHERE scan_status IN ('queued','running')")

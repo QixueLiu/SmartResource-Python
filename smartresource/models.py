@@ -79,3 +79,13 @@ class AlternativesRequest(BaseModel):
     book_id: int = Field(gt=0)
     chapter_title: str = Field(min_length=1, max_length=200)
     max_sites: int = Field(default=6, ge=1, le=8)
+
+
+class VideoFavoriteCreate(BaseModel):
+    site_id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=200)
+    video_url: str = Field(min_length=8, max_length=1500)
+
+
+class VideoLastPage(BaseModel):
+    url: str = Field(min_length=8, max_length=1500)

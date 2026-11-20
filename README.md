@@ -17,6 +17,17 @@ pytest -q
 
 将 \`SMARTRESOURCE_API_TOKEN\` 设置为随机、足够长的值；不设置则仅健康检查可用，其他 API 返回 503。Android APP 在设置页填写 Token。需要手机外网访问时，优先通过 Tailscale；仅允许 Tailscale 网络访问该端口，**切勿把 8000 直接暴露公网**。
 
+## 视频收藏与上次观看页面（0.14）
+
+新增简洁的视频收藏 API，与小说书架并列，继续使用同一个 FastAPI Token 和 SQLite：
+
+- `GET /api/videos/shelf`：读取收藏和最近打开页面。
+- `POST /api/videos/shelf`：保存 `{"site_id":1,"title":"作品名","video_url":"https://视频站/详情"}`，重复收藏不会清空上次观看记录。
+- `PUT /api/videos/shelf/{id}/last-page`：记录同一站点内的最新观看页面网址。
+- `DELETE /api/videos/shelf/{id}`：移除收藏。
+
+仅保存网站 URL、作品名称和时间，不下载或代理任何视频流，不尝试绕过 DRM、付费或反爬措施。WebView 页面跳转不一定代表实际播放，故目前记录的是**上次打开的网页**而非精确播放时长。无法判断正在播放的集数时，用户仍可在原站自行选择。
+
 ## 快速站点检查与有界搜索（0.12）
 
 保持简洁和速度优先：`POST /api/sites/{id}/quick-check` 在用户主动点击时执行，限定总共8秒，只使用普通 HTTP、站点首页一次和最多一次站内样本试搜，**不启动 Ollama 或 Chromium**。只有样本搜索匹配到原作品链接才自动补全原本缺失的搜索 URL。原来已有的搜索 URL 永远不会被静默覆盖；如发现不同且验证通过的候选，只返回 `candidate_template` 供 Android 端用户确认。此验证只是单个样本，不证明所有内容可用。

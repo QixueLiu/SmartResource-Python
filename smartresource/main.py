@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest, ShelfCreate, ShelfProgress, AlternativesRequest, VideoFavoriteCreate, VideoLastPage
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
@@ -14,6 +14,9 @@ from .reader import extract_reader_page, expand_toc_result
 from .fallback_sources import find_sources
 from .site_health import health_map, site_health_detail, observe, classify_error
 from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
+from .video_library import (
+    list_videos, save_video, remember_video_page, delete_video, VideoLibraryError
+)
 from .analyzer import analyze_html
 from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
@@ -29,7 +32,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.12.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.14.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -65,7 +68,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.12.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.14.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -507,3 +510,34 @@ async def reader_alternatives(request: AlternativesRequest):
         dict(row), sites, request.chapter_title, max_sites=request.max_sites
     )
     return {"book_id": request.book_id, **result}
+
+
+@app.get("/api/videos/shelf", dependencies=[Depends(require_token)])
+def video_favorites():
+    return {"items": list_videos()}
+
+
+@app.post("/api/videos/shelf", status_code=201, dependencies=[Depends(require_token)])
+def video_favorite_add(item: VideoFavoriteCreate):
+    try:
+        return save_video(item.site_id, item.title, item.video_url)
+    except VideoLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/videos/shelf/{video_id}/last-page", dependencies=[Depends(require_token)])
+def video_last_page(video_id: int, item: VideoLastPage):
+    try:
+        return remember_video_page(video_id, item.url)
+    except VideoLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/videos/shelf/{video_id}", dependencies=[Depends(require_token)])
+def video_favorite_delete(video_id: int):
+    try:
+        return delete_video(video_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
