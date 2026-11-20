@@ -58,14 +58,16 @@ def test_full_mode_expands_coverage_and_caches_repeat_queries(monkeypatch, tmp_p
     assert len(fast["items"]) == 24
     assert len(full["items"]) == 30
     assert full["searched_sites"] == 30
-    assert len(calls) == 54
+    assert len(calls) == 30
+    assert full["reused_sites"] == 24
     again = query(sources, "大作", mode="full")
     assert again["cached"] is True
     assert again["elapsed_ms"] == 0
-    assert len(calls) == 54
+    assert len(calls) == 30
     forced = query(sources, "大作", mode="full", refresh=True)
     assert forced["cached"] is False
-    assert len(calls) == 84
+    assert len(calls) == 60
+    assert forced["reused_sites"] == 0
 
 
 def test_exact_titles_rank_above_fuzzy_and_duplicates_are_removed(monkeypatch, tmp_path):
