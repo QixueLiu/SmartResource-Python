@@ -184,7 +184,9 @@ def extract_reader_page(html: str, url: str, site: dict) -> dict:
         }
 
     content = "\n\n".join(paragraphs)
-    if len(content) < 160:
+    # Short, clearly numbered chapters can be valid. Otherwise stay conservative.
+    minimum = 95 if is_chapter and len(paragraphs) >= 2 else 160
+    if len(content) < minimum:
         return {
             "kind": "fallback", "title": title, "source_url": url,
             "site_id": site["id"], "site_name": site["name"],
