@@ -17,6 +17,8 @@ PER_SITE_SECONDS = 6.0
 FULL_SEARCH_SITES = 96
 FULL_SEARCH_SECONDS = 26.0
 FULL_SEARCH_CONCURRENCY = 16
+FULL_SEARCH_PAGES = 3
+FULL_SITE_MAX_RESULTS = 100
 CACHE_TTL_SECONDS = 90.0
 CACHE_MAX_ENTRIES = 32
 SITE_CACHE_MAX_ENTRIES = 160
@@ -228,6 +230,55 @@ async def fetch_site_results(site: dict, keyword: str):
         return [], f"检索失败：{reason}（请检查站点或稍后重试）"
 
 
+async def fetch_additional_search_page(
+    site: dict, keyword: str, page: int
+) -> tuple[list[dict], str | None]:
+    """Fetch a later result page only for an explicit, same-origin {page} rule.
+
+    Normal quick search never calls this helper. Later pages do not create
+    extra health success/failure samples for the same user search.
+    """
+    template = site.get("search_url_template") or ""
+    if "{q}" not in template or "{page}" not in template or page < 2:
+        return [], "该来源未提供可用的搜索分页规则"
+
+    url = template.replace("{q}", quote_plus(keyword)).replace("{page}", str(page))
+    host = urlsplit(site["base_url"]).hostname
+    # fetch_analysis_html / fetch_html validates that the destination is
+    # public and within the saved site's origin before making any request.
+    html, _ = await fetch_analysis_html(url, host, http_fetch=fetch_html)
+    fields = ("item_selector", "title_selector", "link_selector")
+    if all(site.get(field) for field in fields):
+        items = extract_search_results(site, html, url, keyword)
+        if items:
+            return items, None
+        fallback = heuristic_search_results(site, html, url, keyword)
+        return fallback, (
+            "后续页 CSS 未命中，使用未经验证的关键词候选" if fallback else None
+        )
+    return (
+        heuristic_search_results(site, html, url, keyword),
+        "后续页使用未经验证的关键词候选",
+    )
+
+
+def _merge_site_pages(
+    initial: list[dict], additional: list[dict], limit: int = FULL_SITE_MAX_RESULTS
+) -> list[dict]:
+    """Keep the first result for a URL, in source-page order."""
+    seen = set()
+    combined = []
+    for item in (*initial, *additional):
+        identifier = _dedup_key(item["url"])
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        combined.append(item)
+        if len(combined) >= limit:
+            break
+    return combined
+
+
 def _site_cache_key(site: dict, keyword: str):
     fields = (
         "id", "name", "base_url", "kind", "search_url_template",
@@ -313,6 +364,7 @@ async def search_all(
             "unconfigured_sites": unconfigured,
             "skipped_sites": 0, "timed_out_sites": 0,
             "reused_sites": 0,
+            "extra_pages_fetched": 0,
             "mode": mode, "kind": kind, "cached": False,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
         }
@@ -322,20 +374,79 @@ async def search_all(
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one(site):
-        cache_key = _site_cache_key(site, query)
-        if not refresh:
-            cached_site = _read_site_cache(cache_key)
-            if cached_site is not None:
-                return (*cached_site, True)
+        first_key = _site_cache_key(site, query)
+        has_pages = (
+            mode == "full"
+            and "{q}" in (site.get("search_url_template") or "")
+            and "{page}" in (site.get("search_url_template") or "")
+        )
+        full_key = first_key + ("full_pages",)
+        if has_pages and not refresh:
+            full_cached = _read_site_cache(full_key)
+            if full_cached is not None:
+                return (*full_cached, True, 0)
+
+        first_cached = _read_site_cache(first_key) if not refresh else None
+        if not has_pages and first_cached is not None:
+            return (*first_cached, True, 0)
+
         async with semaphore:
-            try:
-                result = await asyncio.wait_for(
-                    fetch_site_results(site, query), timeout=PER_SITE_SECONDS
-                )
-                _write_site_cache(cache_key, result)
-                return (*result, False)
-            except asyncio.TimeoutError:
-                return [], "网站响应超过单站6秒限制", False
+            started_site = time.monotonic()
+            reused = first_cached is not None
+            if reused:
+                first_rows, first_warning = first_cached
+            else:
+                try:
+                    first_rows, first_warning = await asyncio.wait_for(
+                        fetch_site_results(site, query), timeout=PER_SITE_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    return [], "网站响应超过单站6秒限制", False, 0
+                _write_site_cache(first_key, (first_rows, first_warning))
+
+            if not has_pages or (first_warning or "").startswith("检索失败："):
+                return first_rows, first_warning, reused, 0
+
+            results = _merge_site_pages(first_rows, [])
+            warning = first_warning
+            extra_pages = 0
+            complete = True
+            for page in range(2, FULL_SEARCH_PAGES + 1):
+                if len(results) >= FULL_SITE_MAX_RESULTS:
+                    break
+                remaining = PER_SITE_SECONDS - (time.monotonic() - started_site)
+                if remaining <= 0:
+                    warning = (warning + "；" if warning else "") + "后续分页达到单站时间上限"
+                    complete = False
+                    break
+                try:
+                    rows, page_warning = await asyncio.wait_for(
+                        fetch_additional_search_page(site, query, page),
+                        timeout=remaining
+                    )
+                    extra_pages += 1
+                except asyncio.TimeoutError:
+                    warning = (warning + "；" if warning else "") + "后续分页读取超时"
+                    complete = False
+                    break
+                except Exception:
+                    warning = (warning + "；" if warning else "") + "后续分页读取失败"
+                    complete = False
+                    break
+
+                if page_warning and rows:
+                    warning = (warning + "；" if warning else "") + page_warning
+                if not rows:
+                    break
+                merged = _merge_site_pages(results, rows)
+                if len(merged) == len(results):
+                    # A site may serve page one for all requested numbers.
+                    break
+                results = merged
+
+            if complete:
+                _write_site_cache(full_key, (results, warning))
+            return results, warning, reused, extra_pages
 
     tasks = {asyncio.create_task(one(site)): site for site in chosen}
     done, pending = await asyncio.wait(tasks, timeout=budget)
@@ -348,15 +459,17 @@ async def search_all(
     timeout_count = len(pending)
     per_site_timeouts = 0
     reused_count = 0
+    extra_pages_fetched = 0
     for task in done:
         site = tasks[task]
         try:
             record = task.result()
         except Exception:
-            record = ([], "站点请求异常", False)
+            record = ([], "站点请求异常", False, 0)
         by_id[site["id"]] = record[:2]
         if record[2]:
             reused_count += 1
+        extra_pages_fetched += record[3]
         if record[1] and "超过单站6秒" in record[1]:
             timeout_count += 1
             per_site_timeouts += 1
@@ -398,6 +511,7 @@ async def search_all(
         "skipped_sites": skipped,
         "timed_out_sites": timeout_count,
         "reused_sites": reused_count,
+        "extra_pages_fetched": extra_pages_fetched,
         "mode": mode, "kind": kind, "cached": False,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
     }
