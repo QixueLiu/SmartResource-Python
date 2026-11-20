@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlsplit, urldefrag
 from bs4 import BeautifulSoup, Tag
 
 EPISODE_LABEL = re.compile(
-    r"^(?:第\s*[0-9一二三四五六七八九十百千零〇两]+\s*[集期话]"
+    r"^(?:(?:第\s*[0-9一二三四五六七八九十两]+\s*季\s*)?第\s*[0-9一二三四五六七八九十百千零〇两]+\s*[集期话]"
     r"|(?:ep(?:isode)?|s\d{1,2}\s*e)\s*[-.:# ]*\s*\d{1,3}\b"
     r"|\d{1,3}\s*[集期话]\b|正片(?:\s*\d+)?$)",
     re.I,
@@ -25,6 +25,33 @@ PAGER_MARKER = re.compile(
 )
 
 MAX_EPISODES = 80
+_SERIES_EPISODE = re.compile(
+    r"^(?:第\\s*(\\d{1,2})\\s*季\\s*)?第\\s*(\\d{1,3})\\s*[集期话]"
+    r"|^S(\\d{1,2})E(\\d{1,3})\\b"
+    r"|^(?:EP|Episode)\\s*[-.:# ]*\\s*(\\d{1,3})\\b"
+    r"|^(\\d{1,3})\\s*[集期话]?\\s*$",
+    re.I,
+)
+
+
+def _episode_numbers(title: str, numbered_playlist: bool = False):
+    match = _SERIES_EPISODE.search(title)
+    if match is None:
+        return None, None
+    if match.group(1) or match.group(2):
+        season = int(match.group(1)) if match.group(1) else None
+        episode = int(match.group(2))
+    elif match.group(3):
+        season, episode = int(match.group(3)), int(match.group(4))
+    elif match.group(5):
+        season, episode = None, int(match.group(5))
+    else:
+        if not numbered_playlist:
+            return None, None
+        season, episode = None, int(match.group(6))
+    if not 1 <= episode <= 999:
+        return None, None
+    return season, episode
 
 
 def _playlist_context(link: Tag) -> bool:
@@ -79,7 +106,13 @@ def parse_episodes(html: str, page_url: str, expected_host: str) -> dict:
                 or url == page or url in seen):
             continue
         seen.add(url)
-        items.append({"title": title, "url": url})
+        season, episode = _episode_numbers(title, _playlist_context(link))
+        item = {"title": title, "url": url}
+        if season is not None:
+            item["season_number"] = season
+        if episode is not None:
+            item["episode_number"] = episode
+        items.append(item)
         if len(items) >= MAX_EPISODES:
             break
     return {
