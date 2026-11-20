@@ -1,6 +1,7 @@
 import os
 import hmac
 import sqlite3
+import asyncio
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
@@ -28,7 +29,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.11.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.12.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -64,7 +65,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.11.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.12.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -232,6 +233,95 @@ async def analyze_site(site_id: int, request: AnalyzeRequest):
         raise HTTPException(502, "网站结构分析失败：" + str(exc)[:180]) from exc
     except Exception as exc:
         raise HTTPException(502, "目标网站访问或解析失败：" + str(exc)[:180]) from exc
+
+
+
+@app.post("/api/sites/{site_id}/quick-check", dependencies=[Depends(require_token)])
+async def quick_check_site(site_id: int):
+    """One user-initiated lightweight check; no Ollama or Chromium.
+
+    Missing search templates are filled only after a positive homepage sample
+    search. Existing user rules are NEVER overwritten; a verified replacement
+    is returned for explicit approval in the app.
+    """
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM sites WHERE id=? AND enabled=1", (site_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "找不到已启用的网站")
+    site = dict(row)
+    host = urlsplit(site["base_url"]).hostname
+    old = site.get("search_url_template") or ""
+    try:
+        async with asyncio.timeout(8):
+            # Static HTML only, 1 homepage fetch and at most 1 search probe.
+            html = await fetch_html(site["base_url"], host)
+            report = analyze_html(html, site["base_url"], site)
+            discovered = report.get("search_candidate") or {}
+            proposal = discovered.get("search_url_template") or ""
+            template = proposal or old
+            if not template:
+                return {
+                    "status": "needs_rule", "verified": False,
+                    "auto_applied": False, "candidate_template": None,
+                    "message": "未找到可验证的 GET 搜索入口，保留原网站浏览",
+                }
+            # Never trust form action without validating its same-site URL.
+            validate_public_url(
+                template.replace("{q}", "sample").replace("{page}", "1")
+            )
+            if validate_public_url(
+                template.replace("{q}", "sample").replace("{page}", "1")
+            ) != host:
+                raise ValueError("搜索入口不是同一网站")
+            result = await verify_search(
+                {**site, "search_url_template": template}, html, fetch=fetch_html
+            )
+    except TimeoutError as exc:
+        raise HTTPException(504, "快速检查超时（8秒），未修改网站规则") from exc
+    except ValueError as exc:
+        raise HTTPException(422, "网址或搜索表单无效：" + str(exc)[:100]) from exc
+    except Exception as exc:
+        raise HTTPException(502, "快速检查未完成：" + type(exc).__name__) from exc
+
+    verified = result["status"] == "probe_passed"
+    candidate_different = bool(old and proposal and proposal != old)
+    if candidate_different:
+        # A different form candidate can be reviewed, but not saved silently.
+        return {
+            "status": result["status"], "verified": verified,
+            "auto_applied": False, "candidate_template": proposal if verified else None,
+            "message": ("新搜索入口已通过一个作品样本验证，可确认后替换旧规则"
+                        if verified else "发现不同的搜索入口，但样本未通过；旧规则未改动"),
+        }
+
+    applied = False
+    if verified and not old and proposal:
+        with connect() as conn:
+            cursor = conn.execute(
+                """UPDATE sites SET search_url_template=?, scan_status='probe_passed',
+                   scan_message=?, scan_checked_at=?
+                   WHERE id=? AND enabled=1 AND
+                   (search_url_template IS NULL OR search_url_template='')""",
+                (proposal, "快速检查：单个首页作品样本试搜通过",
+                 datetime.now(timezone.utc).isoformat(), site_id),
+            )
+            applied = cursor.rowcount == 1
+    elif verified and old:
+        with connect() as conn:
+            conn.execute(
+                """UPDATE sites SET scan_status='probe_passed',
+                   scan_message=?, scan_checked_at=?
+                   WHERE id=? AND enabled=1 AND search_url_template=?""",
+                ("快速检查：已保存搜索地址的单样本验证通过",
+                 datetime.now(timezone.utc).isoformat(), site_id, old),
+            )
+    return {
+        "status": result["status"], "verified": verified,
+        "auto_applied": applied, "candidate_template": None,
+        "message": ("已自动配置经过样本验证的搜索入口" if applied
+                    else "已保存搜索地址的样本验证通过，未更改已有规则" if verified
+                    else result["message"] + "；未改动原有规则"),
+    }
 
 
 @app.post("/api/sites/{site_id}/verify-search", dependencies=[Depends(require_token)])

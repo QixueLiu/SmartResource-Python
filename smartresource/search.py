@@ -5,6 +5,11 @@ from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
 from .site_health import observe, classify_error, health_map, rank_sites
 
+# Keep one slow/broken site from delaying every search result.
+MAX_SEARCH_SITES = 24
+MAX_SEARCH_SECONDS = 8.0
+PER_SITE_SECONDS = 6.0
+
 
 def extract_search_results(site: dict, html: str, search_url: str):
     soup = BeautifulSoup(html, "html.parser")
@@ -90,22 +95,50 @@ async def fetch_site_results(site: dict, keyword: str):
 
 
 async def search_all(sites: list[dict], q: str):
-    semaphore = asyncio.Semaphore(5)
+    # Search top-ranked sources first. Skipped sites are explicitly reported;
+    # all remain configured and may be searched in a later request.
+    ordered = rank_sites(sites)
+    chosen = ordered[:MAX_SEARCH_SITES]
+    skipped = len(ordered) - len(chosen)
+    if not chosen:
+        return {"items": [], "warnings": [], "searched_sites": 0}
+
+    semaphore = asyncio.Semaphore(8)
 
     async def one(site):
         async with semaphore:
-            return await fetch_site_results(site, q)
+            try:
+                return await asyncio.wait_for(
+                    fetch_site_results(site, q), timeout=PER_SITE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                return [], "网站响应超过单站6秒限制"
 
-    # Prefer sites with actual successes; never suppress a poorly scoring site.
-    ordered = rank_sites(sites)
-    outcomes = await asyncio.gather(*(one(site) for site in ordered))
-    health = health_map([site["id"] for site in ordered])
+    tasks = {asyncio.create_task(one(site)): site for site in chosen}
+    done, pending = await asyncio.wait(tasks, timeout=MAX_SEARCH_SECONDS)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    by_id = {}
+    for task in done:
+        site = tasks[task]
+        try:
+            by_id[site["id"]] = task.result()
+        except Exception:
+            by_id[site["id"]] = ([], "站点请求异常")
+    health = health_map([site["id"] for site in chosen])
     results, seen, warnings = [], set(), []
-    for site, (items, warning) in zip(ordered, outcomes):
+    for site in chosen:
+        items, warning = by_id.get(site["id"], ([], "整次搜索达到8秒时间上限"))
         if warning:
             warnings.append({"site_id": site["id"], "site_name": site["name"], "message": warning})
         for item in items:
             if item["url"] not in seen:
                 seen.add(item["url"])
                 results.append({**item, "source_health": health[site["id"]]})
-    return {"items": results, "warnings": warnings, "searched_sites": len(sites)}
+    result = {"items": results, "warnings": warnings, "searched_sites": len(chosen)}
+    if skipped:
+        result["skipped_sites"] = skipped
+        result["note"] = "为保证响应速度，仅检索了优先级较高的24个站点；其余站点未检索"
+    return result
