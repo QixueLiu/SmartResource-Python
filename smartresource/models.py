@@ -60,6 +60,7 @@ class ScanRequest(BaseModel):
 class ReaderRequest(BaseModel):
     site_id: int = Field(gt=0)
     url: str = Field(min_length=8, max_length=1500)
+    max_toc_pages: int = Field(default=3, ge=1, le=5)
 
 
 class ShelfCreate(BaseModel):

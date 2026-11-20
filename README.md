@@ -17,6 +17,12 @@ pytest -q
 
 将 \`SMARTRESOURCE_API_TOKEN\` 设置为随机、足够长的值；不设置则仅健康检查可用，其他 API 返回 503。Android APP 在设置页填写 Token。需要手机外网访问时，优先通过 Tailscale；仅允许 Tailscale 网络访问该端口，**切勿把 8000 直接暴露公网**。
 
+## 小说目录自动翻页（0.9）
+
+`POST /api/reader/open` 在识别出小说目录时，默认沿着明确标注的 **目录下一页** 继续读取并合并章节，最多 3 个目录页面（包括第一页），只读取同一网站域名并根据章节 URL 去重。不会把“下一章”当作目录翻页，也不会自动下载正文。
+
+可传 `max_toc_pages` 调整为 1–5；返回 `pages_fetched`、`has_more_directory_pages`、`next_directory_page` 及 `directory_warnings`。超过上限时明确标记仍存在后续目录，不声称全书完整。站点使用复杂 JS 分页、无限滚动或不同分页标签时仍可能遗漏。
+
 ## 小说书架与跨设备阅读进度（0.8）
 
 增加由自建 FastAPI Token 保护的私有书架。数据保存在 Python 服务端 SQLite，不上传第三方云服务；同一服务地址和 Token 可以让不同 Android 设备看到同一记录。

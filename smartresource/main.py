@@ -9,7 +9,7 @@ from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
-from .reader import extract_reader_page
+from .reader import extract_reader_page, expand_toc_result
 from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputError
 from .analyzer import analyze_html
 from .fetcher import fetch_html
@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.8.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.9.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -58,7 +58,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.8.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.9.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -308,6 +308,15 @@ async def reader_open(request: ReaderRequest):
             request.url, host, http_fetch=fetch_html
         )
         result = extract_reader_page(html, request.url, site)
+        if result.get("kind") == "toc" and request.max_toc_pages > 1:
+            async def fetch_followup(next_url, expected_host):
+                page_html, _ = await fetch_analysis_html(
+                    next_url, expected_host, http_fetch=fetch_html
+                )
+                return page_html
+            result = await expand_toc_result(
+                result, site, fetch_followup, max_pages=request.max_toc_pages
+            )
         result["fetch_mode"] = fetch_mode
         return result
     except HTTPException:

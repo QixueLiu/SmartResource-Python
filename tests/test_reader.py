@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
-from smartresource.reader import extract_reader_page
+from smartresource.reader import extract_reader_page, expand_toc_result
+import asyncio
 from smartresource.main import app
 
 SITE = {"id": 3, "name": "Booksite", "base_url": "https://books.example.org",
@@ -91,3 +92,62 @@ def test_reader_api_renders_chapter(api, monkeypatch):
     assert response.status_code == 200, response.text
     assert response.json()["kind"] == "chapter"
     assert "清晨" in response.json()["content"]
+
+
+
+def _directory(page: int, next_url: str | None = None):
+    offset = (page - 1) * 3
+    li = "".join(
+        f'<li><a href="/chapters/{number}">第{number}章 正文</a></li>'
+        for number in range(offset + 1, offset + 4)
+    )
+    pager = f'<div class="pagination"><a href="{next_url}">目录下一页</a></div>' if next_url else ""
+    return f'<h1>示例长篇小说</h1><ul id="chapters">{li}</ul>{pager}'
+
+
+def test_directory_page_navigation_and_deduplication():
+    first = extract_reader_page(
+        _directory(1, "/book/1?page=2"), "https://books.example.org/book/1", SITE
+    )
+    assert first["kind"] == "toc"
+    assert first["toc_next_url"] == "https://books.example.org/book/1?page=2"
+
+    calls = []
+    async def fake_fetch(url, host):
+        calls.append(url)
+        assert host == "books.example.org"
+        if "?page=2" in url:
+            return _directory(2, "/book/1?page=3")
+        if "?page=3" in url:
+            return _directory(3)
+        raise AssertionError("unwanted follow-up fetch")
+    result = asyncio.run(expand_toc_result(first, SITE, fake_fetch, max_pages=3))
+    assert len(result["chapters"]) == 9
+    assert result["pages_fetched"] == 3
+    assert result["has_more_directory_pages"] is False
+    assert len(calls) == 2
+
+
+def test_directory_crawl_is_bounded_and_no_external_page():
+    page = _directory(1, "https://bad.example.net/book/1?page=2")
+    first = extract_reader_page(page, "https://books.example.org/book/1", SITE)
+    assert first["toc_next_url"] is None
+    async def no_fetch(url, host):
+        raise AssertionError("must not fetch")
+    out = asyncio.run(expand_toc_result(first, SITE, no_fetch))
+    assert len(out["chapters"]) == 3
+    assert out["pages_fetched"] == 1
+
+    first = extract_reader_page(
+        _directory(1, "/book/1?page=2"), "https://books.example.org/book/1", SITE
+    )
+    out = asyncio.run(expand_toc_result(first, SITE, no_fetch, max_pages=1))
+    assert out["has_more_directory_pages"] is True
+    assert len(out["chapters"]) == 3
+
+
+def test_chapter_next_link_not_mistaken_for_directory_page():
+    html = _directory(1) + '<a href="/chapter/4">下一章</a>'
+    first = extract_reader_page(html, "https://books.example.org/book/1", SITE)
+    assert first["kind"] == "toc"
+    assert first["toc_next_url"] is None

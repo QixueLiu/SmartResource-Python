@@ -163,6 +163,84 @@ def _toc_items(soup: BeautifulSoup, html: str, url: str, site: dict, host: str):
         return [], discovered
 
 
+
+PAGE_LABEL = re.compile(r"^(?:目录)?(?:下一页|下页|后一页|next\s*page|next\s*list)\s*[»›>→]*$", re.I)
+PAGING_HINT = re.compile(r"(?:page|paging|pagination|目录分页|翻页|页码)", re.I)
+
+
+def _next_toc_page(soup: BeautifulSoup, url: str, host: str) -> str | None:
+    """Follow only explicit directory PAGE navigation, never next-chapter links."""
+    for a in soup.select("a[href]")[:5000]:
+        label = a.get_text(" ", strip=True)[:60]
+        marker = ""
+        ancestor = a
+        for _ in range(3):
+            ancestor = ancestor.parent
+            if not isinstance(ancestor, Tag):
+                break
+            marker += " " + str(ancestor.get("id") or "")
+            marker += " " + " ".join(str(x) for x in ancestor.get("class", []))
+        in_pages = bool(PAGING_HINT.search(marker))
+        if not (PAGE_LABEL.fullmatch(label) or (in_pages and label.casefold() in ("next", "下一页", "下页"))):
+            continue
+        target = _same_host_link(url, str(a.get("href") or ""), host)
+        if target:
+            return target
+    return None
+
+
+async def expand_toc_result(
+    initial: dict, site: dict, fetch_page, *, max_pages: int = 3
+) -> dict:
+    """Bounded, same-domain directory continuation. Never downloads chapters."""
+    if initial.get("kind") != "toc":
+        return initial
+    host = urlsplit(site["base_url"]).hostname
+    page_url = initial["source_url"]
+    seen_pages = {page_url}
+    unique_chapters = {x["url"] for x in initial["chapters"]}
+    chapters = list(initial["chapters"])
+    next_page = initial.get("toc_next_url")
+    pages = 1
+    warnings = []
+    for _ in range(max(1, min(max_pages, 5)) - 1):
+        if not next_page or next_page in seen_pages:
+            break
+        if urlsplit(next_page).hostname != host:
+            warnings.append("目录翻页指向其他域名，已停止")
+            break
+        seen_pages.add(next_page)
+        try:
+            html = await fetch_page(next_page, host)
+            parsed = extract_reader_page(html, next_page, site)
+        except Exception as exc:
+            warnings.append(f"后续目录页无法读取：{type(exc).__name__}")
+            break
+        if parsed.get("kind") != "toc":
+            warnings.append("后续页面不是有效目录，已停止翻页")
+            break
+        pages += 1
+        new_count = 0
+        for chapter in parsed["chapters"]:
+            if chapter["url"] not in unique_chapters:
+                unique_chapters.add(chapter["url"])
+                chapters.append(chapter)
+                new_count += 1
+        if new_count == 0:
+            warnings.append("目录页内容重复，已停止翻页")
+            break
+        page_url = next_page
+        next_page = parsed.get("toc_next_url")
+    result = dict(initial)
+    result["chapters"] = chapters[:5000]
+    result["pages_fetched"] = pages
+    result["has_more_directory_pages"] = bool(next_page and next_page not in seen_pages)
+    result["next_directory_page"] = next_page if result["has_more_directory_pages"] else None
+    result["directory_warnings"] = warnings
+    result["note"] = "已按页面顺序合并同站目录（最多 3 页）；未校验全书完整性"
+    return result
+
+
 def extract_reader_page(html: str, url: str, site: dict) -> dict:
     host = urlsplit(site["base_url"]).hostname
     if urlsplit(url).hostname != host:
@@ -171,6 +249,7 @@ def extract_reader_page(html: str, url: str, site: dict) -> dict:
     title = _title(soup)
     _, paragraphs = _best_content(soup)
     toc, toc_discovered = _toc_items(soup, html, url, site, host)
+    toc_next = _next_toc_page(soup, url, host) if len(toc) >= 3 else None
 
     # A book details page with a chapter index should show its directory,
     # not the surrounding book synopsis as if it were a chapter.
@@ -180,6 +259,7 @@ def extract_reader_page(html: str, url: str, site: dict) -> dict:
             "kind": "toc", "title": title, "source_url": url,
             "site_id": site["id"], "site_name": site["name"],
             "chapters": toc, "toc_discovered": toc_discovered,
+            "toc_next_url": toc_next,
             "note": "单页目录识别结果，可能缺页、缺章或混入其他链接"
         }
 
