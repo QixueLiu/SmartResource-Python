@@ -55,3 +55,8 @@ class ScanRequest(BaseModel):
     # When IDs are omitted, scan up to 'limit' sites needing setup.
     site_ids: list[int] = Field(default_factory=list, max_length=200)
     limit: int = Field(default=100, ge=1, le=200)
+
+
+class ReaderRequest(BaseModel):
+    site_id: int = Field(gt=0)
+    url: str = Field(min_length=8, max_length=1500)

@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from .db import connect, initialize
-from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest
+from .models import SiteIn, SitePatch, UrlImport, CompareRequest, AnalyzeRequest, ScanRequest, ReaderRequest
 from .security import validate_site, validate_public_url
 from .search import search_all
 from .novels import compare
+from .reader import extract_reader_page
 from .analyzer import analyze_html
 from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
@@ -23,7 +24,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.6.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -55,7 +56,7 @@ def store_site(conn, site: SiteIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "smartresource-python", "version": "0.5.0"}
+    return {"status": "ok", "service": "smartresource-python", "version": "0.6.0"}
 
 
 @app.get("/api/sites", dependencies=[Depends(require_token)])
@@ -243,3 +244,34 @@ async def compare_novels(request: CompareRequest):
     with connect() as conn:
         rows = conn.execute("SELECT * FROM sites WHERE enabled=1").fetchall()
     return await compare({row["id"]: dict(row) for row in rows}, request.candidates)
+
+
+@app.post("/api/reader/open", dependencies=[Depends(require_token)])
+async def reader_open(request: ReaderRequest):
+    """Extract one public chapter or index page; always preserve original URL."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM sites WHERE id=? AND enabled=1",
+            (request.site_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "未找到已启用的站点")
+    site = dict(row)
+    host = urlsplit(site["base_url"]).hostname
+    try:
+        if validate_public_url(request.url) != host:
+            raise HTTPException(422, "阅读地址必须与当前站点域名一致")
+        html, fetch_mode = await fetch_analysis_html(
+            request.url, host, http_fetch=fetch_html
+        )
+        result = extract_reader_page(html, request.url, site)
+        result["fetch_mode"] = fetch_mode
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)[:180]) from exc
+    except Exception as exc:
+        raise HTTPException(
+            502, "网页正文提取未完成，请使用原网页：" + str(exc)[:130]
+        ) from exc
