@@ -130,3 +130,42 @@ def test_search_api_rejects_bad_types_and_blank_query(client):
     assert client.get("/api/search?q=a&mode=unknown", headers=headers).status_code == 422
     assert client.get("/api/search?q=a&kind=movie", headers=headers).status_code == 422
     assert client.get("/api/search?q=a&mode=full&kind=video", headers=headers).status_code == 200
+
+
+
+def test_expired_css_rules_use_low_confidence_keyword_fallback(monkeypatch, tmp_path):
+    monkeypatch.setenv("SMARTRESOURCE_DB", str(tmp_path / "fallback.sqlite"))
+    from smartresource import search
+    template = site(9)
+    template.update({
+        "item_selector": ".old-result",
+        "title_selector": "a.title",
+        "link_selector": "a.title",
+    })
+    async def sample(url, host, http_fetch=None):
+        return (
+            '<html><a href="/book/9">春风故事</a>'
+            '<a href="/book/10">其他故事</a></html>', "http"
+        )
+    monkeypatch.setattr(search, "fetch_analysis_html", sample)
+    rows, warning = asyncio.run(search.fetch_site_results(template, "春风故事"))
+    assert len(rows) == 1
+    assert rows[0]["extraction"] == "heuristic"
+    assert rows[0]["url"] == template["base_url"] + "/book/9"
+    assert "未经验证" in warning
+
+
+def test_no_css_or_heuristic_match_is_neutral(monkeypatch, tmp_path):
+    monkeypatch.setenv("SMARTRESOURCE_DB", str(tmp_path / "fallback-empty.sqlite"))
+    template = site(9)
+    template.update({
+        "item_selector": ".old-result",
+        "title_selector": "a.title",
+        "link_selector": "a.title",
+    })
+    async def sample(url, host, http_fetch=None):
+        return '<html><a href="/book/9">毫不相关</a></html>', "http"
+    monkeypatch.setattr(search, "fetch_analysis_html", sample)
+    rows, warning = asyncio.run(search.fetch_site_results(template, "春风故事"))
+    assert not rows
+    assert "CSS" in warning
