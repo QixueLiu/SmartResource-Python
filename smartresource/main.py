@@ -17,6 +17,7 @@ from .shelf import add_book, list_books, save_progress, remove_book, ShelfInputE
 from .video_library import (
     list_videos, save_video, remember_video_page, delete_video, VideoLibraryError
 )
+from .video_episodes import parse_episodes
 from .analyzer import analyze_html
 from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SmartResource Python API", version="0.14.0", lifespan=lifespan)
+app = FastAPI(title="SmartResource Python API", version="0.15.0", lifespan=lifespan)
 
 SITE_FIELDS = (
     "name", "base_url", "kind", "enabled", "search_url_template",
@@ -533,6 +534,36 @@ def video_last_page(video_id: int, item: VideoLastPage):
         raise HTTPException(422, str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+
+@app.get("/api/videos/shelf/{video_id}/episodes", dependencies=[Depends(require_token)])
+async def video_episode_links(video_id: int):
+    """Read one saved public detail page, never scan a full series or media."""
+    with connect() as conn:
+        row = conn.execute(
+            """SELECT video_library.video_url, sites.base_url, sites.enabled
+               FROM video_library JOIN sites ON video_library.site_id = sites.id
+               WHERE video_library.id=?""", (video_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "视频收藏不存在")
+    if not row["enabled"]:
+        return {"status": "unavailable", "items": [], "note": "来源网站已停用，请先启用后重试。"}
+    host = urlsplit(row["base_url"]).hostname
+    if validate_public_url(row["video_url"]) != host:
+        raise HTTPException(422, "收藏地址与网站域名不一致")
+    try:
+        # One public HTML request with a strict overall response-time cap.
+        html = await asyncio.wait_for(
+            fetch_html(row["video_url"], host), timeout=7.0
+        )
+        return parse_episodes(html, row["video_url"], host)
+    except Exception:
+        return {
+            "status": "unavailable", "items": [],
+            "note": "暂时无法识别选集，可继续在原网站直接观看。"
+        }
 
 
 @app.delete("/api/videos/shelf/{video_id}", dependencies=[Depends(require_token)])
