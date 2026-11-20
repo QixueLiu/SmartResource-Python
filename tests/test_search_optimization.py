@@ -171,3 +171,18 @@ def test_no_css_or_heuristic_match_is_neutral(monkeypatch, tmp_path):
     rows, warning = asyncio.run(search.fetch_site_results(template, "春风故事"))
     assert not rows
     assert "CSS" in warning
+
+
+
+def test_per_site_timeout_does_not_count_as_completed(monkeypatch, tmp_path):
+    monkeypatch.setenv("SMARTRESOURCE_DB", str(tmp_path / "single-timeout.sqlite"))
+    monkeypatch.setattr(search, "PER_SITE_SECONDS", 0.01)
+    async def slow(record, q):
+        await asyncio.sleep(0.06)
+        return [], None
+    monkeypatch.setattr(search, "fetch_site_results", slow)
+    outcome = query([site(777)], "超时验证")
+    assert outcome["searched_sites"] == 1
+    assert outcome["completed_sites"] == 0
+    assert outcome["timed_out_sites"] == 1
+    assert len(outcome["warnings"]) == 1
