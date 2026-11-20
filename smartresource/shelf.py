@@ -49,7 +49,8 @@ def add_book(site_id: int, book_url: str, title: str):
                 last_chapter_title, progress, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(site_id,book_url) DO UPDATE SET
-                title=excluded.title""",
+                title=CASE WHEN novel_shelf.title_custom=1
+                     THEN novel_shelf.title ELSE excluded.title END""",
             (site_id, book_url, title.strip(), book_url, "", now, now)
         )
         row = conn.execute(
@@ -125,6 +126,23 @@ def save_current_book_page(page_url: str, title: str):
             (site_id, page_url)
         ).fetchone()
     return {**dict(row), "site_name": site_name, "created_site": created_site}
+
+
+def rename_book(book_id: int, title: str):
+    """Rename a book explicitly without touching reading state or sort order."""
+    cleaned = title.strip()
+    if not cleaned or len(cleaned) > 200:
+        raise ShelfInputError("小说名称应为1至200字")
+    with connect() as conn:
+        changed = conn.execute(
+            "UPDATE novel_shelf SET title=?, title_custom=1 WHERE id=?",
+            (cleaned, book_id),
+        ).rowcount
+        if not changed:
+            raise KeyError("书架中没有这本书")
+        return dict(conn.execute(
+            "SELECT * FROM novel_shelf WHERE id=?", (book_id,)
+        ).fetchone())
 
 
 def save_progress(book_id: int, chapter_url: str, chapter_title: str, progress: float):
