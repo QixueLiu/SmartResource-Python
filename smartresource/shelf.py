@@ -59,6 +59,74 @@ def add_book(site_id: int, book_url: str, title: str):
     return dict(row)
 
 
+def save_current_book_page(page_url: str, title: str):
+    """Bookmark a user-selected novel page without crawling or reading it.
+
+    The page may be an index rather than a confirmed book detail; the reader
+    later attempts to identify its chapter links. Existing site rules and
+    reading progress are never modified by this quick-save action.
+    """
+    from urllib.parse import urldefrag
+
+    page_url = urldefrag(page_url.strip())[0]
+    try:
+        host = validate_public_url(page_url)
+    except ValueError as exc:
+        raise ShelfInputError(str(exc)) from exc
+    parts = urlsplit(page_url)
+    if not parts.path.strip("/") and not parts.query:
+        raise ShelfInputError("请先打开小说详情或目录页，再加入书架")
+    cleaned_title = title.strip()
+    if not cleaned_title:
+        raise ShelfInputError("小说名称不能为空")
+    if len(cleaned_title) > 200:
+        raise ShelfInputError("小说名称最多200字")
+
+    created_site = False
+    with connect() as conn:
+        existing = next(
+            (row for row in conn.execute("SELECT * FROM sites ORDER BY id DESC")
+             if urlsplit(row["base_url"]).hostname == host),
+            None
+        )
+        if existing is not None:
+            if not existing["enabled"]:
+                raise ShelfInputError("网站已停用，请先在网站管理中启用")
+            if existing["kind"] == "video":
+                raise ShelfInputError("该网站已设置为视频来源，请先检查网站类型")
+            site_id, site_name = existing["id"], existing["name"]
+        else:
+            base_url = f"{parts.scheme}://{host}"
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO sites
+                   (name, base_url, kind, enabled, scan_status, scan_message)
+                   VALUES (?, ?, 'novel', 1, 'skipped', ?)""",
+                (host, base_url, "浏览器小说收藏创建；未自动扫描网站")
+            )
+            row = conn.execute(
+                "SELECT id, name FROM sites WHERE base_url=?", (base_url,)
+            ).fetchone()
+            if row is None:
+                raise ShelfInputError("无法添加小说来源")
+            site_id, site_name = row["id"], row["name"]
+            created_site = cursor.rowcount == 1
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT INTO novel_shelf
+               (site_id, book_url, title, last_chapter_url,
+                last_chapter_title, progress, created_at, updated_at)
+               VALUES (?, ?, ?, ?, '', 0, ?, ?)
+               ON CONFLICT(site_id, book_url) DO NOTHING""",
+            (site_id, page_url, cleaned_title, page_url, now, now)
+        )
+        row = conn.execute(
+            """SELECT * FROM novel_shelf WHERE site_id=? AND book_url=?""",
+            (site_id, page_url)
+        ).fetchone()
+    return {**dict(row), "site_name": site_name, "created_site": created_site}
+
+
 def save_progress(book_id: int, chapter_url: str, chapter_title: str, progress: float):
     with connect() as conn:
         row = conn.execute(
