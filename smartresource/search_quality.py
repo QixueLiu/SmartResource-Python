@@ -13,9 +13,9 @@ _VERSION_MARKERS = (
 def video_core_matches_query(item: dict, query: str) -> bool:
     """Same normalized video title after stripping only known title metadata.
 
-    A year, season or explicit edition mismatch is a contradiction, while
-    omitted metadata is unknown and not a verified match. We only apply this
-    ranking hint to sources explicitly categorized as video.
+    A year, season or edition explicitly requested by the user must match
+    the candidate's visible title metadata; missing metadata remains unknown,
+    not a precision signal. We only apply this to explicit video sources.
     """
     if item.get("kind") != "video":
         return False
@@ -27,6 +27,9 @@ def video_core_matches_query(item: dict, query: str) -> bool:
     for marker in _VERSION_MARKERS:
         requested = expected[marker]
         found = observed[marker]
-        if requested is not None and found is not None and requested != found:
+        # When the query explicitly requests an edition, a candidate with
+        # missing metadata is UNKNOWN, not a high-precision title-core match.
+        # Keep the candidate available without awarding this extra boost.
+        if requested is not None and found != requested:
             return False
     return True
