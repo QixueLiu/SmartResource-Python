@@ -144,7 +144,12 @@ def import_entries(entries, limit=0):
                 stats["created"] += 1
             else:
                 updates = {}
+                # Avoid attaching CSS designed for a different search endpoint.
+                compatible_css = (not row["search_url_template"]
+                                  or row["search_url_template"] == site.search_url_template)
                 for field in ("search_url_template", "item_selector", "title_selector", "link_selector"):
+                    if field != "search_url_template" and not compatible_css:
+                        continue
                     if not row[field] and getattr(site, field):
                         updates[field] = getattr(site, field)
                 if row["kind"] == "other" and site.kind == "novel":
