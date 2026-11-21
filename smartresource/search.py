@@ -19,6 +19,7 @@ MAX_SEARCH_SITES = 24
 MAX_SEARCH_SECONDS = 8.0
 PER_SITE_SECONDS = 6.0
 FULL_SEARCH_SITES = 96
+FULL_SEARCH_BATCH_SITES = 48
 FULL_SEARCH_SECONDS = 26.0
 FULL_SEARCH_CONCURRENCY = 16
 FULL_SEARCH_PAGES = 3
@@ -444,7 +445,7 @@ def _write_site_cache(key, payload):
 
 async def search_all(
     sites: list[dict], q: str, mode: str = "fast", kind: str = "all",
-    refresh: bool = False,
+    refresh: bool = False, after_site_id: int | None = None,
 ):
     """Bounded personalized search: fast first, optional wider coverage.
 
@@ -455,7 +456,7 @@ async def search_all(
         raise ValueError("不支持的检索模式或类型")
 
     query = q.strip()
-    if not sites:
+    if not sites and after_site_id is None:
         return {"items": [], "warnings": [], "searched_sites": 0}
 
     started = time.monotonic()
@@ -470,7 +471,7 @@ async def search_all(
         ]
     searchable = [s for s in candidates if s.get("search_url_template")]
     unconfigured = len(candidates) - len(searchable)
-    key = _cache_key(candidates, query, mode, kind)
+    key = _cache_key(candidates, query, mode, kind) + (after_site_id,)
     if not refresh:
         cached = _get_cached(key)
         if cached is not None:
@@ -487,8 +488,16 @@ async def search_all(
     limit = MAX_SEARCH_SITES if mode == "fast" else FULL_SEARCH_SITES
     budget = MAX_SEARCH_SECONDS if mode == "fast" else FULL_SEARCH_SECONDS
     concurrency = 8 if mode == "fast" else FULL_SEARCH_CONCURRENCY
-    chosen = ordered[:limit]
+    if after_site_id is None:
+        chosen = ordered[:limit]
+    else:
+        # Site health can change after each batch, so it cannot order a cursor.
+        limit = min(limit, FULL_SEARCH_BATCH_SITES)
+        ordered = sorted((site for site in searchable if site["id"] > after_site_id),
+                         key=lambda site: site["id"])
+        chosen = ordered[:limit]
     skipped = len(ordered) - len(chosen)
+    cursor = {"next_site_id": chosen[-1]["id"] if skipped else None} if after_site_id is not None else {}
     # Check both explicit templates and links cached from prior quick
     # searches. A fresh first-page fetch can discover more links below.
 
@@ -496,7 +505,7 @@ async def search_all(
         response = {
             "items": [], "warnings": [], "searched_sites": 0,
             "collapsed_duplicate_urls": 0,
-            "completed_sites": 0, "searchable_sites": 0,
+            "completed_sites": 0, "searchable_sites": len(searchable),
             "unconfigured_sites": unconfigured,
             "skipped_sites": 0, "timed_out_sites": 0,
             "reused_sites": 0,
@@ -504,7 +513,7 @@ async def search_all(
             "paginated_sites": 0,
             "discovered_pagination_sites": 0,
             "mode": mode, "kind": kind, "cached": False,
-            "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "elapsed_ms": round((time.monotonic() - started) * 1000), **cursor,
         }
         _put_cached(key, response)
         return response
@@ -705,7 +714,7 @@ async def search_all(
         "paginated_sites": paginated_sites,
         "discovered_pagination_sites": discovered_pagination_sites,
         "mode": mode, "kind": kind, "cached": False,
-        "elapsed_ms": round((time.monotonic() - started) * 1000),
+        "elapsed_ms": round((time.monotonic() - started) * 1000), **cursor,
     }
     if skipped:
         response["note"] = (

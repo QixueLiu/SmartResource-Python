@@ -404,6 +404,7 @@ async def search(
     mode: Literal["fast", "full"] = "fast",
     kind: Literal["all", "novel", "video"] = "all",
     refresh: bool = False,
+    after_site_id: int | None = Query(default=None, ge=0),
 ):
     if not q.strip():
         raise HTTPException(422, "请输入要搜索的作品名称")
@@ -413,7 +414,7 @@ async def search(
         ).fetchall()
     return await search_all(
         [dict(row) for row in rows], q.strip(),
-        mode=mode, kind=kind, refresh=refresh
+        mode=mode, kind=kind, refresh=refresh, after_site_id=after_site_id
     )
 
 
