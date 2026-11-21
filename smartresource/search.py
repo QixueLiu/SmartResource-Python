@@ -11,6 +11,7 @@ from .browser_renderer import fetch_analysis_html
 from .site_health import observe, classify_error, health_map, rank_sites
 from .search_pagination import discover_next_search_page
 from .search_grouping import annotate_same_title_candidates
+from .search_quality import video_core_matches_query
 
 # Keep one slow/broken site from delaying every search result.
 MAX_SEARCH_SITES = 24
@@ -416,6 +417,12 @@ async def search_all(
 
     metrics = health_map([s["id"] for s in searchable])
     ordered = rank_sites(searchable, metrics=metrics)
+    if kind in ("novel", "video"):
+        # In the 24-source fast-search budget, favor sites specifically
+        # configured for the selected content type. Mixed/unknown sites are
+        # still searched when capacity remains; full search retains them all.
+        # Python's stable sort preserves existing health ordering per tier.
+        ordered.sort(key=lambda site: site.get("kind") != kind)
     limit = MAX_SEARCH_SITES if mode == "fast" else FULL_SEARCH_SITES
     budget = MAX_SEARCH_SECONDS if mode == "fast" else FULL_SEARCH_SECONDS
     concurrency = 8 if mode == "fast" else FULL_SEARCH_CONCURRENCY
@@ -575,9 +582,16 @@ async def search_all(
                 "_source_order": index,
             })
 
+    # Metadata evidence improves ranking without asserting that two websites
+    # host the same work, edition or playable media.
+    for item in results:
+        if item.get("kind") == "video":
+            item["video_title_core_match"] = video_core_matches_query(item, query)
+
     # Relevance remains the primary ranking signal. Among equally relevant
-    # candidates, favor verified CSS extraction and only trust site health
-    # after it has at least four real success/failure observations.
+    # candidates, favor verified CSS extraction. Video core-title matches
+    # can then beat loosely related titles, followed by measured site health
+    # (only after at least four real success/failure observations).
     def stable_site_score(item):
         health = item.get("source_health") or {}
         return health.get("score", 50) if health.get("samples", 0) >= 4 else 50
@@ -585,6 +599,7 @@ async def search_all(
     results.sort(key=lambda item: (
         _quality(item, query),
         bool(item.get("extraction") == "heuristic"),
+        not item.get("video_title_core_match", False),
         -stable_site_score(item),
         item["_source_order"],
     ))
