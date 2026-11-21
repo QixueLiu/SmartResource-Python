@@ -134,10 +134,14 @@ def delete_site(site_id: int):
 
 
 @app.post("/api/sites/import", dependencies=[Depends(require_token)])
-def import_sites(items: list[SiteIn], background_tasks: BackgroundTasks, auto_scan: bool = True):
+def import_sites(
+    items: list[SiteIn], background_tasks: BackgroundTasks, auto_scan: bool = True,
+    enrich_missing_rules: bool = False,
+):
     if len(items) > 1000:
         raise HTTPException(413, "一次最多导入 1000 条")
     created, failed, new_ids = 0, [], []
+    enriched = 0
     with connect() as conn:
         for index, site in enumerate(items):
             try:
@@ -145,14 +149,29 @@ def import_sites(items: list[SiteIn], background_tasks: BackgroundTasks, auto_sc
                 if store_site(conn, site):
                     created += 1
                     new_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                elif enrich_missing_rules and site.search_url_template:
+                    updated = conn.execute(
+                        """UPDATE sites SET search_url_template=?, item_selector=?,
+                           title_selector=?, link_selector=?
+                           WHERE base_url=? AND NULLIF(TRIM(search_url_template), '') IS NULL
+                           AND NULLIF(TRIM(item_selector), '') IS NULL
+                           AND NULLIF(TRIM(title_selector), '') IS NULL
+                           AND NULLIF(TRIM(link_selector), '') IS NULL
+                           AND (kind=? OR kind='mixed')""",
+                        (site.search_url_template, site.item_selector, site.title_selector,
+                         site.link_selector, site.base_url, site.kind),
+                    )
+                    enriched += updated.rowcount
             except (ValueError, sqlite3.Error) as exc:
                 failed.append({"index": index, "reason": str(exc)[:150]})
     queued = enqueue_scan(new_ids) if auto_scan else []
     if queued:
         background_tasks.add_task(scan_sites, queued)
-    return {"created": created, "existing": len(items)-created-len(failed),
-            "failed": failed, "auto_scan_queued": len(queued)}
-
+    result = {"created": created, "existing": len(items)-created-len(failed),
+              "failed": failed, "auto_scan_queued": len(queued)}
+    if enrich_missing_rules:
+        result["enriched"] = enriched
+    return result
 
 @app.post("/api/sites/import-text", dependencies=[Depends(require_token)])
 def import_text(data: UrlImport, background_tasks: BackgroundTasks, auto_scan: bool = True):
