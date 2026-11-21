@@ -1,12 +1,13 @@
 import asyncio
 import copy
+import json
 import os
 import re
 import time
 import unicodedata
 from urllib.parse import urljoin, quote_plus, unquote_plus, urlsplit, urlunsplit
 from bs4 import BeautifulSoup
-from .fetcher import fetch_html
+from .fetcher import fetch_html, fetch_text
 from .browser_renderer import fetch_analysis_html
 from .site_health import observe, classify_error, health_map, rank_sites
 from .search_pagination import discover_next_search_page
@@ -253,12 +254,37 @@ def heuristic_search_results(site: dict, html: str, search_url: str, keyword: st
     return result
 
 
+async def fetch_nasa_video_results(site: dict, keyword: str):
+    api = "https://images-api.nasa.gov/search"
+    url = f"{api}?q={quote_plus(keyword)}&media_type=video&page_size=40"
+    payload = await fetch_text(url, "images-api.nasa.gov", ("application/json",))
+    results = []
+    for item in json.loads(payload)["collection"]["items"][:40]:
+        for record in item.get("data", [])[:1]:
+            nasa_id = record.get("nasa_id", "")
+            title = record.get("title", "").strip()[:200]
+            if not title or record.get("media_type") != "video" or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", nasa_id) or nasa_id in (".", ".."):
+                continue
+            grade = _match_grade(title, keyword)
+            if grade != "unrelated":
+                results.append({
+                    "title": title, "url": f"https://images.nasa.gov/details/{nasa_id}",
+                    "site_id": site["id"], "site_name": site["name"], "kind": site["kind"],
+                    "extraction": "json", "match_grade": grade,
+                })
+    return results
+
+
 async def fetch_site_results(site: dict, keyword: str):
     if not site.get("search_url_template"):
         return [], "未发现已保存的站内搜索地址（仍可原网页浏览）"
     url = site["search_url_template"].replace("{q}", quote_plus(keyword)).replace("{page}", "1")
     try:
         host = urlsplit(site["base_url"]).hostname
+        if host == "images.nasa.gov" and site["kind"] == "video" and urlsplit(url).path == "/search":
+            rows = await fetch_nasa_video_results(site, keyword)
+            observe(site["id"], "search", "success" if rows else "neutral", "ok" if rows else "empty_results")
+            return rows, None
         html, _ = await fetch_analysis_html(url, host, http_fetch=fetch_html)
         if "{page}" not in (site.get("search_url_template") or ""):
             _save_next_link(
@@ -293,7 +319,15 @@ async def fetch_site_results(site: dict, keyword: str):
     except Exception as exc:
         reason = classify_error(exc)
         observe(site["id"], "search", "failure", reason)
-        return [], f"检索失败：{reason}（请检查站点或稍后重试）"
+        detail = {
+            "timeout": "请求超时",
+            "upstream_error": "上游站点暂不可用",
+            "rate_limited": "站点限制请求频率",
+            "access_restricted": "站点限制访问",
+            "network_error": "无法连接站点或站点返回请求错误",
+            "parse_failure": "站点响应格式无法解析",
+        }.get(reason, "站点请求异常")
+        return [], f"检索失败：{detail}（{reason}）"
 
 
 async def fetch_additional_search_page(

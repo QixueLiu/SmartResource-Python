@@ -7,6 +7,7 @@ Unknown sites keep a neutral prior and remain discoverable.
 from datetime import datetime, timezone, timedelta
 import httpx
 from .db import connect
+from .fetcher import UnsupportedContentType
 
 OPERATIONS = {"search", "reader"}
 OUTCOMES = {"success", "failure", "neutral"}
@@ -20,6 +21,8 @@ MAX_EVENTS_PER_SITE = 150
 
 
 def classify_error(exc: Exception) -> str:
+    if isinstance(exc, UnsupportedContentType):
+        return "parse_failure"
     if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
         return "timeout"
     if isinstance(exc, httpx.HTTPStatusError):

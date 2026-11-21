@@ -41,7 +41,7 @@ def redirect_error(url: str, expected_host: str, status: int, location: str | No
     return f"站点返回 HTTP {status} 同站重定向，需验证目标地址"
 
 
-async def fetch_html(url: str, expected_host: str):
+async def fetch_text(url: str, expected_host: str, content_types: tuple[str, ...]):
     if validate_public_url(url, resolve=True) != expected_host:
         raise ValueError("只能访问已配置的网站域名")
     async with httpx.AsyncClient(
@@ -58,8 +58,8 @@ async def fetch_html(url: str, expected_host: str):
                 )
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").lower()
-            if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
-                raise ValueError("站点返回非 HTML 内容")
+            if content_type.split(";", 1)[0].strip() not in content_types:
+                raise UnsupportedContentType("站点返回不支持的内容格式")
             chunks = bytearray()
             async for part in response.aiter_bytes():
                 chunks.extend(part)
@@ -67,3 +67,11 @@ async def fetch_html(url: str, expected_host: str):
                     raise ValueError("网页体积超过 3MB 限制")
             encoding = response.encoding or "utf-8"
             return chunks.decode(encoding, errors="replace")
+
+
+class UnsupportedContentType(ValueError):
+    pass
+
+
+async def fetch_html(url: str, expected_host: str):
+    return await fetch_text(url, expected_host, ("text/html", "application/xhtml+xml"))
