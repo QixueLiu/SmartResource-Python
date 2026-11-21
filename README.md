@@ -1,5 +1,31 @@
 # SmartResource Python
 
+## 本地一键导入「阅读 / Legado」书源（新增）
+
+在项目根目录、已安装 Python 依赖的环境运行（建议先停止 Uvicorn、备份 data/smartresource.db，避免扫描任务与导入任务并行）：
+
+
+~~~powershell
+# 复用当前 Windows 代理：仅本次终端有效，务必在启动 FastAPI 前设置
+$env:SMARTRESOURCE_USE_ENV_PROXY="1"
+# 或指定明确的 HTTP 代理地址（优先于环境代理）：
+# $env:SMARTRESOURCE_HTTP_PROXY="http://127.0.0.1:7890"
+
+# 试导入前 20 条，不访问外部站点
+.\.venv\Scripts\python.exe -m smartresource.legado_import "D:\书源\reader-sources.json" --limit 20
+
+# 导入全部；只批量检查前 10 个候选，避免一次性访问数千个站点
+.\.venv\Scripts\python.exe -m smartresource.legado_import "D:\书源\reader-sources.json" --scan-limit 10
+~~~
+
+说明：
+- 只识别公共 HTTP(S) 域名，小说书源中的**静态 GET 搜索 URL**（如包含 {{key}}、{{page}}）和简单 CSS 规则；保守忽略 JavaScript、POST、登录、Cookie、签名、专用 JSON API 和第三方站点规则，不执行书源内的代码。
+- 原书源可以包含其他类型，非小说类型仅作禁用的「other」记录，不参与小说搜索。重复导入按站点 URL 去重，只补充原来缺少的规则，**不覆盖**已有的搜索入口或人工配置。
+- 导入的 GET 模板标记为 candidate（候选），不是「已验证可用」。自动扫描最多一次处理 100 站、并发 2；失败与跳回首页不视作成功。
+- 网络请求默认忽略环境代理；SMARTRESOURCE_USE_ENV_PROXY=1 才继承 HTTPX 的环境代理设置。使用 SMARTRESOURCE_HTTP_PROXY 可显式指定代理；所有模式都保留 HTTPS 证书校验、内网/保留地址检查、不自动跟随重定向。仅本地私用，勿暴露 8000 端口到公网。
+- 搜索时从所有启用书源中选取候选（不再只读取数据库前 500 个），但**每次快速搜索仍限制最多 24 个源、全面搜索最多 96 个源**，以保持响应速度。更多来源不意味着一次会检索全部网站。
+
+
 自托管 FastAPI 站点目录、聚合搜索、自动站点配置与小说目录初步分析。**不依赖第三方小说/影视聚合接口**。目前仅适配提供明确站内搜索与目录 CSS 规则、可公开读取的 HTML 网站；网站改版、验证/付费、JS 动态渲染与目录分页等暂不支持。
 
 ## 搜索源优先级与视频核心标题排序（0.32）

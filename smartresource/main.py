@@ -409,7 +409,7 @@ async def search(
         raise HTTPException(422, "请输入要搜索的作品名称")
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM sites WHERE enabled=1 ORDER BY id DESC LIMIT 500"
+            "SELECT * FROM sites WHERE enabled=1 ORDER BY id DESC"
         ).fetchall()
     return await search_all(
         [dict(row) for row in rows], q.strip(),
