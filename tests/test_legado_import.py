@@ -70,6 +70,31 @@ def test_import_is_idempotent_and_preserves_manual_rules(tmp_path, monkeypatch):
     assert len(rows) == 1
     assert rows[0]["search_url_template"] == "https://books.example.org/manual?q={q}"
     assert rows[0]["scan_status"] == "probe_passed"
+    # The original rule belongs to a different endpoint: do not graft selectors
+    # from the imported Legado rule onto the maintained/manual URL.
+    assert rows[0]["item_selector"] == ".result"
+    assert rows[0]["title_selector"] == ".title"
+
+
+def test_existing_custom_template_is_not_given_incompatible_css(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTRESOURCE_DB", str(tmp_path / "custom.db"))
+    initialize()
+    src = sample_source()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO sites(name, base_url, kind, enabled, search_url_template) "
+            "VALUES(?,?,?,?,?)",
+            ("手动站点", "https://books.example.org", "novel", 1,
+             "https://books.example.org/manual?q={q}"),
+        )
+    result = import_entries([src])
+    assert result["unchanged"] == 1
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM sites").fetchone()
+    assert row["search_url_template"] == "https://books.example.org/manual?q={q}"
+    assert row["item_selector"] is None
+    assert row["title_selector"] is None
+    assert row["link_selector"] is None
 
 
 def test_non_novel_source_is_kept_but_disabled():
