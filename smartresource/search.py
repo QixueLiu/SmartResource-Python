@@ -4,7 +4,7 @@ import os
 import re
 import time
 import unicodedata
-from urllib.parse import urljoin, quote_plus, urlsplit, urlunsplit
+from urllib.parse import urljoin, quote_plus, unquote_plus, urlsplit, urlunsplit
 from bs4 import BeautifulSoup
 from .fetcher import fetch_html
 from .browser_renderer import fetch_analysis_html
@@ -69,11 +69,38 @@ def _match_grade(title: str, keyword: str, context: str = "") -> str:
     return "unrelated"
 
 
+# These are narrowly known marketing parameters, not media authentication,
+# episode selectors, paging or arbitrary site-specific query fields.
+_TRACKING_QUERY_KEYS = frozenset({
+    "fbclid", "gclid", "dclid", "msclkid", "yclid", "igshid",
+})
+
+
 def _dedup_key(value: str) -> str:
+    """Canonicalize only obvious duplicate page URLs, never the actual link.
+
+    Preserve query ordering, duplicate keys, encoding, signed tokens and
+    episode IDs. Do not fetch a URL or assume two same-name works are equal.
+    """
     parsed = urlsplit(value)
-    # Fragments and insignificant trailing slashes do not distinguish works.
     path = parsed.path.rstrip("/") or "/"
-    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.query, ""))
+    kept = []
+    for part in parsed.query.split("&"):
+        if not part:
+            continue
+        raw_name = part.partition("=")[0]
+        name = unquote_plus(raw_name).casefold()
+        if name.startswith("utm_") or name in _TRACKING_QUERY_KEYS:
+            continue
+        kept.append(part)
+    return urlunsplit((
+        parsed.scheme.lower(), parsed.netloc.lower(), path, "&".join(kept), ""
+    ))
+
+
+def _duplicate_preference(item: dict, keyword: str) -> tuple[int, bool]:
+    """Prefer stronger title evidence, then configured CSS over heuristics."""
+    return (_quality(item, keyword), item.get("extraction") == "heuristic")
 
 
 def _quality(item: dict, keyword: str) -> int:
@@ -434,6 +461,7 @@ async def search_all(
     if not chosen:
         response = {
             "items": [], "warnings": [], "searched_sites": 0,
+            "collapsed_duplicate_urls": 0,
             "completed_sites": 0, "searchable_sites": 0,
             "unconfigured_sites": unconfigured,
             "skipped_sites": 0, "timed_out_sites": 0,
@@ -564,7 +592,8 @@ async def search_all(
             timeout_count += 1
             per_site_timeouts += 1
 
-    results, seen, warnings = [], set(), []
+    results, result_indexes, warnings = [], {}, []
+    collapsed_duplicate_urls = 0
     for index, site in enumerate(chosen):
         rows, warning = by_id.get(site["id"], ([], "本次搜索达到时间上限"))
         if warning:
@@ -574,13 +603,23 @@ async def search_all(
             })
         for row in rows:
             key_url = _dedup_key(row["url"])
-            if key_url in seen:
-                continue
-            seen.add(key_url)
-            results.append({
+            candidate = {
                 **row, "source_health": metrics.get(site["id"], {}),
                 "_source_order": index,
-            })
+            }
+            existing_index = result_indexes.get(key_url)
+            if existing_index is not None:
+                collapsed_duplicate_urls += 1
+                existing = results[existing_index]
+                if _duplicate_preference(candidate, query) < _duplicate_preference(
+                    existing, query
+                ):
+                    # One logical page, better textual evidence. Preserve its
+                    # actual original URL and source; never invent a URL.
+                    results[existing_index] = candidate
+                continue
+            result_indexes[key_url] = len(results)
+            results.append(candidate)
 
     # Metadata evidence improves ranking without asserting that two websites
     # host the same work, edition or playable media.
@@ -620,6 +659,7 @@ async def search_all(
     )
     response = {
         "items": results, "warnings": warnings,
+        "collapsed_duplicate_urls": collapsed_duplicate_urls,
         "searched_sites": len(chosen),
         "completed_sites": len(done) - per_site_timeouts,
         "searchable_sites": len(searchable),
