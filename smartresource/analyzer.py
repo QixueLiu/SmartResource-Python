@@ -80,6 +80,25 @@ def detect_search_form(soup: BeautifulSoup, page_url: str, host: str):
 
 
 def detect_toc(soup: BeautifulSoup, page_url: str, host: str):
+    # Explicit EPUB navigation can use Roman numerals instead of chapter titles.
+    chapter_link = 'a[href*="chapter-"]'
+    for nav_selector in ('nav[epub\\:type="toc"]', 'nav[role="doc-toc"]', 'nav#toc'):
+        selector = f"{nav_selector} li:has(> {chapter_link})"
+        links = {
+            urljoin(page_url, row["href"])
+            for row in soup.select(selector + f" > {chapter_link}")[:1500]
+            if _host_matches(urljoin(page_url, row["href"]), host)
+        }
+        if len(links) >= 3:
+            return {
+                "toc_item_selector": selector,
+                "toc_title_selector": f":scope > {chapter_link}",
+                "toc_link_selector": f":scope > {chapter_link}",
+                "matched_chapter_links": len(links),
+                "confidence": "medium",
+                "status": "candidate_only",
+                "evidence": ["在明确标注的目录导航中找到站内章节链接"],
+            }
     groups = defaultdict(list)
     for a in soup.select("a[href]")[:15000]:
         title = a.get_text(" ", strip=True)

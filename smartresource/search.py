@@ -1,12 +1,13 @@
 import asyncio
 import copy
+import json
 import os
 import re
 import time
 import unicodedata
 from urllib.parse import urljoin, quote_plus, unquote_plus, urlsplit, urlunsplit
 from bs4 import BeautifulSoup
-from .fetcher import fetch_html
+from .fetcher import fetch_html, fetch_text
 from .browser_renderer import fetch_analysis_html
 from .site_health import observe, classify_error, health_map, rank_sites
 from .search_pagination import discover_next_search_page
@@ -18,6 +19,7 @@ MAX_SEARCH_SITES = 24
 MAX_SEARCH_SECONDS = 8.0
 PER_SITE_SECONDS = 6.0
 FULL_SEARCH_SITES = 96
+FULL_SEARCH_BATCH_SITES = 48
 FULL_SEARCH_SECONDS = 26.0
 FULL_SEARCH_CONCURRENCY = 16
 FULL_SEARCH_PAGES = 3
@@ -253,12 +255,37 @@ def heuristic_search_results(site: dict, html: str, search_url: str, keyword: st
     return result
 
 
+async def fetch_nasa_video_results(site: dict, keyword: str):
+    api = "https://images-api.nasa.gov/search"
+    url = f"{api}?q={quote_plus(keyword)}&media_type=video&page_size=40"
+    payload = await fetch_text(url, "images-api.nasa.gov", ("application/json",))
+    results = []
+    for item in json.loads(payload)["collection"]["items"][:40]:
+        for record in item.get("data", [])[:1]:
+            nasa_id = record.get("nasa_id", "")
+            title = record.get("title", "").strip()[:200]
+            if not title or record.get("media_type") != "video" or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", nasa_id) or nasa_id in (".", ".."):
+                continue
+            grade = _match_grade(title, keyword)
+            if grade != "unrelated":
+                results.append({
+                    "title": title, "url": f"https://images.nasa.gov/details/{nasa_id}",
+                    "site_id": site["id"], "site_name": site["name"], "kind": site["kind"],
+                    "extraction": "json", "match_grade": grade,
+                })
+    return results
+
+
 async def fetch_site_results(site: dict, keyword: str):
     if not site.get("search_url_template"):
         return [], "未发现已保存的站内搜索地址（仍可原网页浏览）"
     url = site["search_url_template"].replace("{q}", quote_plus(keyword)).replace("{page}", "1")
     try:
         host = urlsplit(site["base_url"]).hostname
+        if host == "images.nasa.gov" and site["kind"] == "video" and urlsplit(url).path == "/search":
+            rows = await fetch_nasa_video_results(site, keyword)
+            observe(site["id"], "search", "success" if rows else "neutral", "ok" if rows else "empty_results")
+            return rows, None
         html, _ = await fetch_analysis_html(url, host, http_fetch=fetch_html)
         if "{page}" not in (site.get("search_url_template") or ""):
             _save_next_link(
@@ -293,7 +320,15 @@ async def fetch_site_results(site: dict, keyword: str):
     except Exception as exc:
         reason = classify_error(exc)
         observe(site["id"], "search", "failure", reason)
-        return [], f"检索失败：{reason}（请检查站点或稍后重试）"
+        detail = {
+            "timeout": "请求超时",
+            "upstream_error": "上游站点暂不可用",
+            "rate_limited": "站点限制请求频率",
+            "access_restricted": "站点限制访问",
+            "network_error": "无法连接站点或站点返回请求错误",
+            "parse_failure": "站点响应格式无法解析",
+        }.get(reason, "站点请求异常")
+        return [], f"检索失败：{detail}（{reason}）"
 
 
 async def fetch_additional_search_page(
@@ -410,7 +445,7 @@ def _write_site_cache(key, payload):
 
 async def search_all(
     sites: list[dict], q: str, mode: str = "fast", kind: str = "all",
-    refresh: bool = False,
+    refresh: bool = False, after_site_id: int | None = None,
 ):
     """Bounded personalized search: fast first, optional wider coverage.
 
@@ -421,7 +456,7 @@ async def search_all(
         raise ValueError("不支持的检索模式或类型")
 
     query = q.strip()
-    if not sites:
+    if not sites and after_site_id is None:
         return {"items": [], "warnings": [], "searched_sites": 0}
 
     started = time.monotonic()
@@ -436,7 +471,7 @@ async def search_all(
         ]
     searchable = [s for s in candidates if s.get("search_url_template")]
     unconfigured = len(candidates) - len(searchable)
-    key = _cache_key(candidates, query, mode, kind)
+    key = _cache_key(candidates, query, mode, kind) + (after_site_id,)
     if not refresh:
         cached = _get_cached(key)
         if cached is not None:
@@ -453,8 +488,16 @@ async def search_all(
     limit = MAX_SEARCH_SITES if mode == "fast" else FULL_SEARCH_SITES
     budget = MAX_SEARCH_SECONDS if mode == "fast" else FULL_SEARCH_SECONDS
     concurrency = 8 if mode == "fast" else FULL_SEARCH_CONCURRENCY
-    chosen = ordered[:limit]
+    if after_site_id is None:
+        chosen = ordered[:limit]
+    else:
+        # Site health can change after each batch, so it cannot order a cursor.
+        limit = min(limit, FULL_SEARCH_BATCH_SITES)
+        ordered = sorted((site for site in searchable if site["id"] > after_site_id),
+                         key=lambda site: site["id"])
+        chosen = ordered[:limit]
     skipped = len(ordered) - len(chosen)
+    cursor = {"next_site_id": chosen[-1]["id"] if skipped else None} if after_site_id is not None else {}
     # Check both explicit templates and links cached from prior quick
     # searches. A fresh first-page fetch can discover more links below.
 
@@ -462,7 +505,7 @@ async def search_all(
         response = {
             "items": [], "warnings": [], "searched_sites": 0,
             "collapsed_duplicate_urls": 0,
-            "completed_sites": 0, "searchable_sites": 0,
+            "completed_sites": 0, "searchable_sites": len(searchable),
             "unconfigured_sites": unconfigured,
             "skipped_sites": 0, "timed_out_sites": 0,
             "reused_sites": 0,
@@ -470,7 +513,7 @@ async def search_all(
             "paginated_sites": 0,
             "discovered_pagination_sites": 0,
             "mode": mode, "kind": kind, "cached": False,
-            "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "elapsed_ms": round((time.monotonic() - started) * 1000), **cursor,
         }
         _put_cached(key, response)
         return response
@@ -671,7 +714,7 @@ async def search_all(
         "paginated_sites": paginated_sites,
         "discovered_pagination_sites": discovered_pagination_sites,
         "mode": mode, "kind": kind, "cached": False,
-        "elapsed_ms": round((time.monotonic() - started) * 1000),
+        "elapsed_ms": round((time.monotonic() - started) * 1000), **cursor,
     }
     if skipped:
         response["note"] = (
